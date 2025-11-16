@@ -1,0 +1,6 @@
+[submodule "SRXL2"]
+	path = SRXL2
+	url = https://github.com/SpektrumRC/SRXL2.git
+[submodule "SpektrumDocumentation"]
+	path = SpektrumDocumentation
+	url = https://github.com/SpektrumRC/SpektrumDocumentation.git
