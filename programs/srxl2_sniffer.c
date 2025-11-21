@@ -4,15 +4,23 @@ MIT License
 SRXL2 Bus Sniffer
 
 This program captures and decodes all SRXL2 traffic on the bus.
-It operates in promiscuous mode to see all packets including its own.
+Supports both simulated (fakeuart) and real (USB-to-serial) transports.
 
 Features:
-- Hex dump of all packets
-- Decoded packet information
+- Multiple output formats (details, json, oneline, state)
+- Real-time state view with ncurses
+- Transport abstraction (fakeuart or serial)
 - Statistics tracking
-- Color-coded output (optional)
 
-Usage: ./srxl2_sniffer [bus_name] [--hex]
+Usage: ./srxl2_sniffer [options]
+  --device <name>      Device (bus name for fakeuart, /dev/tty* for serial)
+  --serial             Use USB-to-serial instead of fakeuart
+  --baud <rate>        Baud rate (115200 or 400000)
+  --format <fmt>       Output format: details|json|oneline|state
+  --hex                Show hex dump (details format only)
+  --show-internal      Show internal heartbeat packets
+  --no-color           Disable colors
+  --list-ports         List available serial ports and exit
 */
 
 #include <stdio.h>
@@ -24,38 +32,38 @@ Usage: ./srxl2_sniffer [bus_name] [--hex]
 #include <signal.h>
 #include <time.h>
 
-// Include SRXL2 library (for decoding only, not as a device)
-#include "../SRXL2/Source/spm_srxl.h"
+// Include SRXL2 parser library
+#include "srxl2_parser.h"
 
-// Include fake UART
-#include "../fakeuart/fakeuart.h"
+// Include transport library
+#include "transport.h"
 
-// ANSI Color codes
-#define COLOR_RESET   "\033[0m"
-#define COLOR_RED     "\033[31m"
-#define COLOR_GREEN   "\033[32m"
-#define COLOR_YELLOW  "\033[33m"
-#define COLOR_BLUE    "\033[34m"
-#define COLOR_MAGENTA "\033[35m"
-#define COLOR_CYAN    "\033[36m"
-#define COLOR_BOLD    "\033[1m"
+// ANSI Color codes (prefixed with ANSI_ to avoid ncurses macro conflicts)
+#define ANSI_RESET   "\033[0m"
+#define ANSI_RED     "\033[31m"
+#define ANSI_GREEN   "\033[32m"
+#define ANSI_YELLOW  "\033[33m"
+#define ANSI_BLUE    "\033[34m"
+#define ANSI_MAGENTA "\033[35m"
+#define ANSI_CYAN    "\033[36m"
+#define ANSI_BOLD    "\033[1m"
 
-// Packet type emojis
-#define EMOJI_HANDSHAKE  "🤝"
-#define EMOJI_CHANNEL    "📡"
-#define EMOJI_TELEMETRY  "📊"
-#define EMOJI_BIND       "🔗"
-#define EMOJI_RSSI       "📶"
-#define EMOJI_PARAM      "⚙️"
-#define EMOJI_UNKNOWN    "❓"
-#define EMOJI_INVALID    "❌"
+// Output format types
+typedef enum {
+    FORMAT_DETAILS,
+    FORMAT_JSON,
+    FORMAT_ONELINE,
+    FORMAT_STATE,
+} output_format_t;
 
 // Globals
 static bool g_running = true;
 static bool g_show_hex = false;
 static bool g_use_colors = true;
-static bool g_show_internal = false;  // By default, hide internal heartbeat packets
+static bool g_show_internal = false;
 static uint64_t g_packet_count = 0;
+static output_format_t g_format = FORMAT_DETAILS;
+static transport_handle_t* g_transport = NULL;
 
 // Statistics
 static struct {
@@ -66,9 +74,41 @@ static struct {
     uint64_t bind_packets;
     uint64_t rssi_packets;
     uint64_t param_packets;
+    uint64_t internal_packets;
     uint64_t unknown_packets;
     uint64_t invalid_packets;
 } g_stats = {0};
+
+// Device state (for state format)
+#define MAX_DEVICES 16
+#define MAX_TELEMETRY_SENSORS 8
+
+typedef struct {
+    uint8_t sensor_id;
+    uint8_t raw_data[16];
+    uint8_t data_len;
+    uint64_t last_seen;
+} telemetry_sensor_t;
+
+typedef struct {
+    uint8_t device_id;
+    bool active;
+    uint32_t uid;
+    uint8_t priority;
+    int8_t rssi;
+    uint16_t frame_losses;
+    uint32_t channel_mask;
+    uint16_t channels[32];
+    uint64_t last_seen;
+    uint64_t packet_count;
+
+    // Telemetry sensors for this device
+    telemetry_sensor_t telemetry[MAX_TELEMETRY_SENSORS];
+    int telemetry_count;
+} device_state_t;
+
+static device_state_t g_devices[MAX_DEVICES] = {0};
+static int g_device_count = 0;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Signal handler
@@ -78,406 +118,784 @@ static void signal_handler(int sig)
 {
     (void)sig;
     g_running = false;
-    printf("\n[Sniffer] Shutting down...\n");
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Helper Functions
 ///////////////////////////////////////////////////////////////////////////////
 
-static void print_hex(const uint8_t* data, uint8_t length)
+static uint64_t get_timestamp_us(void)
 {
-    printf("    Hex: ");
-    for (int i = 0; i < length; ++i)
-    {
-        printf("%02X ", data[i]);
-        if ((i + 1) % 16 == 0 && i < length - 1)
-            printf("\n         ");
-    }
-    printf("\n");
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
-static const char* get_device_type_name(uint8_t deviceID)
+static device_state_t* find_or_create_device(uint8_t device_id)
 {
-    uint8_t devType = (deviceID >> 4) & 0x0F;
-    switch (devType)
-    {
-        case 0x0: return "None";
-        case 0x1: return "Remote Receiver";
-        case 0x2: return "Receiver";
-        case 0x3: return "Flight Controller";
-        case 0x4: return "ESC";
-        case 0x6: return "SRXL Servo 1";
-        case 0x7: return "SRXL Servo 2";
-        case 0x8: return "VTX";
-        case 0x9: return "External RF";
-        case 0xA: return "Remote ID";
-        case 0xB: return "Sensor";
-        case 0xF: return "Broadcast";
-        default:  return "Unknown";
-    }
-}
-
-static uint16_t get_crc_from_packet(const uint8_t* packet, uint8_t length)
-{
-    if (length < 2)
-        return 0;
-    return (packet[length - 2] << 8) | packet[length - 1];
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// Packet Decoding
-///////////////////////////////////////////////////////////////////////////////
-
-static void decode_handshake(const uint8_t* packet, uint8_t length)
-{
-    if (length < sizeof(SrxlHandshakePacket))
-        return;
-
-    SrxlHandshakePacket* pkt = (SrxlHandshakePacket*)packet;
-
-    if (g_use_colors) printf("%s", COLOR_YELLOW);
-    printf("    %s Type: HANDSHAKE\n", EMOJI_HANDSHAKE);
-    printf("    Source: 0x%02X (%s)\n",
-           pkt->payload.srcDevID, get_device_type_name(pkt->payload.srcDevID));
-    printf("    Dest: 0x%02X %s\n",
-           pkt->payload.destDevID,
-           pkt->payload.destDevID == 0xFF ? "(Broadcast)" :
-           pkt->payload.destDevID == 0x00 ? "(Discovery)" : "");
-    printf("    Priority: %u\n", pkt->payload.priority);
-    printf("    Baud: %s\n",
-           pkt->payload.baudSupported & SRXL_BAUD_400000 ? "400000" : "115200");
-    printf("    Info: 0x%02X", pkt->payload.info);
-    if (pkt->payload.info & SRXL_DEVINFO_TELEM_TX_ENABLED)
-        printf(" [TelemTX]");
-    if (pkt->payload.info & SRXL_DEVINFO_TELEM_FULL_RANGE)
-        printf(" [FullRange]");
-    if (pkt->payload.info & SRXL_DEVINFO_FWD_PROG_SUPPORT)
-        printf(" [FwdProg]");
-    printf("\n");
-    printf("    UID: 0x%08X\n", pkt->payload.uid);
-    if (g_use_colors) printf("%s", COLOR_RESET);
-
-    g_stats.handshake_packets++;
-}
-
-static void decode_channel_data(const uint8_t* packet, uint8_t length)
-{
-    if (length < SRXL_CTRL_BASE_LENGTH)
-        return;
-
-    SrxlControlPacket* pkt = (SrxlControlPacket*)packet;
-
-    const char* cmd_name = "CHANNEL";
-    if (pkt->payload.cmd == SRXL_CTRL_CMD_CHANNEL_FS)
-        cmd_name = "CHANNEL_FAILSAFE";
-
-    if (g_use_colors) printf("%s", COLOR_BLUE);
-    printf("    %s Type: %s\n", EMOJI_CHANNEL, cmd_name);
-    printf("    Reply ID: 0x%02X %s\n",
-           pkt->payload.replyID,
-           pkt->payload.replyID == 0 ? "(No telemetry request)" : "");
-    printf("    RSSI: %d %s\n",
-           pkt->payload.channelData.rssi,
-           pkt->payload.channelData.rssi < 0 ? "dBm" : "%");
-    printf("    Frame Losses: %u\n", pkt->payload.channelData.frameLosses);
-    printf("    Channel Mask: 0x%08X\n", pkt->payload.channelData.mask);
-
-    // Count active channels
-    int channelCount = 0;
-    for (int i = 0; i < 32; ++i)
-    {
-        if (pkt->payload.channelData.mask & (1u << i))
-            channelCount++;
-    }
-    printf("    Active Channels: %d\n", channelCount);
-
-    // Show first few channel values
-    if (channelCount > 0 && channelCount <= 8)
-    {
-        printf("    Values: ");
-        int idx = 0;
-        for (int i = 0; i < 32 && idx < channelCount; ++i)
-        {
-            if (pkt->payload.channelData.mask & (1u << i))
-            {
-                printf("Ch%d=%u ", i, pkt->payload.channelData.values[idx] >> 4);
-                idx++;
-            }
+    // Find existing device
+    for (int i = 0; i < g_device_count; i++) {
+        if (g_devices[i].device_id == device_id) {
+            return &g_devices[i];
         }
-        printf("\n");
     }
-    if (g_use_colors) printf("%s", COLOR_RESET);
 
-    g_stats.channel_packets++;
+    // Create new device
+    if (g_device_count < MAX_DEVICES) {
+        device_state_t* dev = &g_devices[g_device_count++];
+        dev->device_id = device_id;
+        dev->active = true;
+        return dev;
+    }
+
+    return NULL;
 }
 
-static void decode_telemetry(const uint8_t* packet, uint8_t length)
+static void json_escape(const char* str)
 {
-    if (length < sizeof(SrxlTelemetryPacket))
-        return;
+    while (*str) {
+        if (*str == '"' || *str == '\\') {
+            putchar('\\');
+        }
+        putchar(*str);
+        str++;
+    }
+}
 
-    SrxlTelemetryPacket* pkt = (SrxlTelemetryPacket*)packet;
+///////////////////////////////////////////////////////////////////////////////
+// Format: JSON
+///////////////////////////////////////////////////////////////////////////////
 
-    if (g_use_colors) printf("%s", COLOR_GREEN);
-    printf("    %s Type: TELEMETRY\n", EMOJI_TELEMETRY);
-    printf("    Dest: 0x%02X\n", pkt->destDevID);
-    printf("    Sensor ID: 0x%02X\n", pkt->payload.sensorID);
+static void output_json_packet(const srxl2_packet_t* packet, uint64_t timestamp, const char* sender, size_t length)
+{
+    printf("{");
+    printf("\"timestamp\":%llu,", (unsigned long long)timestamp);
+    printf("\"packet_num\":%llu,", (unsigned long long)g_packet_count);
+    printf("\"length\":%zu,", length);
+    printf("\"sender\":\"");
+    json_escape(sender);
+    printf("\",");
+    printf("\"type\":\"");
+    json_escape(srxl2_packet_type_name((srxl2_packet_type_t)packet->header.packet_type));
+    printf("\",");
+    printf("\"type_id\":\"0x%02X\",", packet->header.packet_type);
 
-    // Try to decode common telemetry types
-    switch (pkt->payload.sensorID)
-    {
-        case 0x34:  // Flight Pack MAH
-        {
-            int16_t current = pkt->payload.raw[1] | (pkt->payload.raw[2] << 8);
-            int16_t capacity = pkt->payload.raw[3] | (pkt->payload.raw[4] << 8);
-            uint16_t temp = pkt->payload.raw[5] | (pkt->payload.raw[6] << 8);
-
-            printf("    🔋 Battery: %.1fA, %dmAh used",
-                   current / 10.0f, capacity);
-            if (temp != 0x7FFF)
-                printf(", %.1f°C", temp / 10.0f);
-            printf("\n");
+    switch (packet->header.packet_type) {
+        case SRXL2_PKT_HANDSHAKE: {
+            const srxl2_handshake_t* hs = &packet->payload.handshake;
+            printf("\"data\":{");
+            printf("\"src\":\"0x%02X\",", hs->src_device_id);
+            printf("\"dest\":\"0x%02X\",", hs->dest_device_id);
+            printf("\"priority\":%u,", hs->priority);
+            printf("\"baud\":%u,", hs->baud_supported & SRXL2_BAUD_400000 ? 400000 : 115200);
+            printf("\"uid\":\"0x%08X\"", hs->uid);
+            printf("}");
+            break;
+        }
+        case SRXL2_PKT_CONTROL: {
+            const srxl2_control_t* ctrl = &packet->payload.control;
+            printf("\"data\":{");
+            printf("\"cmd\":%u,", ctrl->cmd);
+            printf("\"reply_id\":\"0x%02X\",", ctrl->reply_id);
+            printf("\"rssi\":%d,", ctrl->channel_data.rssi);
+            printf("\"frame_losses\":%u,", ctrl->channel_data.frame_losses);
+            printf("\"channel_mask\":\"0x%08X\",", ctrl->channel_data.channel_mask);
+            printf("\"num_channels\":%u", ctrl->channel_data.num_channels);
+            printf("}");
+            break;
+        }
+        case SRXL2_PKT_TELEMETRY: {
+            const srxl2_telemetry_t* telem = &packet->payload.telemetry;
+            printf("\"data\":{");
+            printf("\"dest\":\"0x%02X\",", telem->dest_device_id);
+            printf("\"sensor_id\":\"0x%02X\"", telem->raw[0]);
+            printf("}");
             break;
         }
         default:
-            printf("    Data: [");
-            for (int i = 0; i < 14; ++i)
-                printf("%02X ", pkt->payload.raw[i + 2]);
-            printf("]\n");
+            printf("\"data\":null");
             break;
     }
-    if (g_use_colors) printf("%s", COLOR_RESET);
 
-    g_stats.telemetry_packets++;
+    printf("}\n");
+    fflush(stdout);
 }
 
-static void decode_bind(const uint8_t* packet, uint8_t length)
+///////////////////////////////////////////////////////////////////////////////
+// Format: Oneline
+///////////////////////////////////////////////////////////////////////////////
+
+static void output_oneline_packet(const srxl2_packet_t* packet, uint64_t timestamp, const char* sender)
 {
-    if (length < sizeof(SrxlBindPacket))
-        return;
+    // Timestamp
+    if (g_use_colors) printf("%s", ANSI_CYAN);
+    printf("[%llu.%06llu]",
+           (unsigned long long)(timestamp / 1000000),
+           (unsigned long long)(timestamp % 1000000));
+    if (g_use_colors) printf("%s", ANSI_RESET);
 
-    SrxlBindPacket* pkt = (SrxlBindPacket*)packet;
+    printf(" #%llu ", (unsigned long long)g_packet_count);
 
-    if (g_use_colors) printf("%s", COLOR_MAGENTA);
-    printf("    %s Type: BIND\n", EMOJI_BIND);
-    printf("    Request: 0x%02X ", pkt->request);
-    switch (pkt->request)
-    {
-        case SRXL_BIND_REQ_ENTER: printf("(Enter Bind)"); break;
-        case SRXL_BIND_REQ_STATUS: printf("(Request Status)"); break;
-        case SRXL_BIND_REQ_BOUND_DATA: printf("(Bound Data Report)"); break;
-        case SRXL_BIND_REQ_SET_BIND: printf("(Set Bind)"); break;
-        default: printf("(Unknown)"); break;
+    // Sender
+    if (g_use_colors) printf("%s", ANSI_BOLD);
+    printf("%-15s", sender);
+    if (g_use_colors) printf("%s", ANSI_RESET);
+
+    // Packet type with emoji and color
+    const char* emoji = "📦";
+    const char* color = ANSI_RESET;
+
+    switch (packet->header.packet_type) {
+        case SRXL2_PKT_HANDSHAKE:
+            emoji = "🤝";
+            color = ANSI_YELLOW;
+            break;
+        case SRXL2_PKT_CONTROL:
+            emoji = "📡";
+            color = ANSI_BLUE;
+            break;
+        case SRXL2_PKT_TELEMETRY:
+            emoji = "📊";
+            color = ANSI_GREEN;
+            break;
+        case SRXL2_PKT_BIND:
+            emoji = "🔗";
+            color = ANSI_MAGENTA;
+            break;
+        case SRXL2_PKT_RSSI:
+            emoji = "📶";
+            color = ANSI_YELLOW;
+            break;
+        case SRXL2_PKT_PARAMETER:
+            emoji = "⚙️";
+            color = ANSI_CYAN;
+            break;
+        case SRXL2_PKT_SPM_INTERNAL:
+            emoji = "💓";
+            color = ANSI_MAGENTA;
+            break;
+        default:
+            emoji = "❓";
+            color = ANSI_RED;
+            break;
     }
+
+    if (g_use_colors) printf(" %s%s", color, emoji);
+    else printf(" %s", emoji);
+
+    printf(" %-12s", srxl2_packet_type_name((srxl2_packet_type_t)packet->header.packet_type));
+    if (g_use_colors) printf("%s", ANSI_RESET);
+
+    // Packet-specific data
+    switch (packet->header.packet_type) {
+        case SRXL2_PKT_HANDSHAKE:
+            printf(" src=");
+            if (g_use_colors) printf("%s", ANSI_YELLOW);
+            printf("0x%02X", packet->payload.handshake.src_device_id);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+
+            printf(" dest=");
+            if (g_use_colors) printf("%s", ANSI_YELLOW);
+            printf("0x%02X", packet->payload.handshake.dest_device_id);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+
+            printf(" uid=");
+            if (g_use_colors) printf("%s", ANSI_CYAN);
+            printf("0x%08X", packet->payload.handshake.uid);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+            break;
+
+        case SRXL2_PKT_CONTROL: {
+            int8_t rssi = packet->payload.control.channel_data.rssi;
+
+            printf(" reply=");
+            if (g_use_colors) printf("%s", ANSI_CYAN);
+            printf("0x%02X", packet->payload.control.reply_id);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+
+            printf(" rssi=");
+            // Color code RSSI: green=good, yellow=ok, red=poor
+            if (g_use_colors) {
+                if (rssi < 0) {
+                    // dBm: > -70 is good, -70 to -85 is ok, < -85 is poor
+                    if (rssi > -70) printf("%s", ANSI_GREEN);
+                    else if (rssi > -85) printf("%s", ANSI_YELLOW);
+                    else printf("%s", ANSI_RED);
+                } else {
+                    // Percent: > 70 is good, 40-70 is ok, < 40 is poor
+                    if (rssi > 70) printf("%s", ANSI_GREEN);
+                    else if (rssi > 40) printf("%s", ANSI_YELLOW);
+                    else printf("%s", ANSI_RED);
+                }
+            }
+            printf("%d%s", rssi, rssi < 0 ? "dBm" : "%");
+            if (g_use_colors) printf("%s", ANSI_RESET);
+
+            printf(" ch=");
+            if (g_use_colors) printf("%s", ANSI_BLUE);
+            printf("%u", packet->payload.control.channel_data.num_channels);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+            break;
+        }
+
+        case SRXL2_PKT_TELEMETRY:
+            printf(" dest=");
+            if (g_use_colors) printf("%s", ANSI_GREEN);
+            printf("0x%02X", packet->payload.telemetry.dest_device_id);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+
+            printf(" sensor=");
+            if (g_use_colors) printf("%s", ANSI_GREEN);
+            printf("0x%02X", packet->payload.telemetry.raw[0]);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+            break;
+
+        case SRXL2_PKT_BIND:
+            printf(" request=");
+            if (g_use_colors) printf("%s", ANSI_MAGENTA);
+            printf("0x%02X", packet->payload.bind.request);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+
+            printf(" device=");
+            if (g_use_colors) printf("%s", ANSI_MAGENTA);
+            printf("0x%02X", packet->payload.bind.device_id);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+            break;
+
+        default:
+            break;
+    }
+
     printf("\n");
-    printf("    Device ID: 0x%02X\n", pkt->deviceID);
-    if (g_use_colors) printf("%s", COLOR_RESET);
-
-    g_stats.bind_packets++;
+    fflush(stdout);
 }
 
-static void decode_packet(const uint8_t* packet, uint8_t length, const char* sender)
+///////////////////////////////////////////////////////////////////////////////
+// Format: Details (original format)
+///////////////////////////////////////////////////////////////////////////////
+
+static void output_details_packet(const srxl2_packet_t* packet, uint64_t timestamp, const char* sender, const uint8_t* data, size_t length)
 {
-    if (length < 5)
-    {
-        printf("  %s [INVALID] Packet too short (%u bytes)\n", EMOJI_INVALID, length);
-        g_stats.invalid_packets++;
-        return;
-    }
+    if (g_use_colors) printf("%s%s", ANSI_BOLD, ANSI_CYAN);
+    printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    printf("⏱️  [%llu.%06llu] Packet #%llu (%zu bytes)\n",
+           (unsigned long long)(timestamp / 1000000),
+           (unsigned long long)(timestamp % 1000000),
+           (unsigned long long)g_packet_count,
+           length);
+    printf("  📤 From: %s\n", sender);
+    printf("  Packet Type: 0x%02X (%s)\n", packet->header.packet_type,
+           srxl2_packet_type_name((srxl2_packet_type_t)packet->header.packet_type));
+    if (g_use_colors) printf("%s", ANSI_RESET);
 
-    // Validate SRXL ID
-    if (packet[0] != SPEKTRUM_SRXL_ID)
-    {
-        printf("  %s [INVALID] Wrong SRXL ID: 0x%02X\n", EMOJI_INVALID, packet[0]);
-        g_stats.invalid_packets++;
-        return;
-    }
-
-    // Validate length
-    if (packet[2] != length)
-    {
-        printf("  %s [INVALID] Length mismatch: header=%u, actual=%u\n",
-               EMOJI_INVALID, packet[2], length);
-        g_stats.invalid_packets++;
-        return;
-    }
-
-    uint8_t packetType = packet[1];
-    uint16_t crc = get_crc_from_packet(packet, length);
-
-    // Filter out internal packets unless explicitly enabled
-    if (!g_show_internal && packetType == SRXL_SPM_INTERNAL)
-    {
-        return;  // Skip internal packets silently
-    }
-
-    if (g_use_colors) printf("%s", COLOR_CYAN);
-    printf("  📤 From: %s%s%s\n",
-           g_use_colors ? COLOR_BOLD : "", sender, g_use_colors ? COLOR_RESET COLOR_CYAN : "");
-    printf("  Packet Type: 0x%02X, Length: %u, CRC: 0x%04X\n",
-           packetType, length, crc);
-    if (g_use_colors) printf("%s", COLOR_RESET);
-
-    // Decode based on packet type
-    switch (packetType)
-    {
-        case SRXL_HANDSHAKE_ID:
-            decode_handshake(packet, length);
+    // Decode packet details
+    switch (packet->header.packet_type) {
+        case SRXL2_PKT_HANDSHAKE: {
+            const srxl2_handshake_t* hs = &packet->payload.handshake;
+            if (g_use_colors) printf("%s", ANSI_YELLOW);
+            printf("    Source: 0x%02X (%s, Unit %u)\n",
+                   hs->src_device_id,
+                   srxl2_device_type_name(srxl2_get_device_type(hs->src_device_id)),
+                   srxl2_get_unit_id(hs->src_device_id));
+            printf("    Dest: 0x%02X\n", hs->dest_device_id);
+            printf("    Priority: %u\n", hs->priority);
+            printf("    UID: 0x%08X\n", hs->uid);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+            g_stats.handshake_packets++;
             break;
-
-        case SRXL_CTRL_ID:
-            decode_channel_data(packet, length);
+        }
+        case SRXL2_PKT_CONTROL: {
+            const srxl2_control_t* ctrl = &packet->payload.control;
+            if (g_use_colors) printf("%s", ANSI_BLUE);
+            printf("    Reply ID: 0x%02X\n", ctrl->reply_id);
+            printf("    RSSI: %d %s\n", ctrl->channel_data.rssi,
+                   ctrl->channel_data.rssi < 0 ? "dBm" : "%");
+            printf("    Frame Losses: %u\n", ctrl->channel_data.frame_losses);
+            printf("    Active Channels: %u\n", ctrl->channel_data.num_channels);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+            g_stats.channel_packets++;
             break;
-
-        case SRXL_TELEM_ID:
-            decode_telemetry(packet, length);
+        }
+        case SRXL2_PKT_TELEMETRY:
+            if (g_use_colors) printf("%s", ANSI_GREEN);
+            printf("    Dest: 0x%02X\n", packet->payload.telemetry.dest_device_id);
+            printf("    Sensor ID: 0x%02X\n", packet->payload.telemetry.raw[0]);
+            if (g_use_colors) printf("%s", ANSI_RESET);
+            g_stats.telemetry_packets++;
             break;
-
-        case SRXL_BIND_ID:
-            decode_bind(packet, length);
+        case SRXL2_PKT_BIND:
+            g_stats.bind_packets++;
             break;
-
-        case SRXL_RSSI_ID:
-            if (g_use_colors) printf("%s", COLOR_YELLOW);
-            printf("    %s Type: RSSI\n", EMOJI_RSSI);
-            if (g_use_colors) printf("%s", COLOR_RESET);
+        case SRXL2_PKT_RSSI:
             g_stats.rssi_packets++;
             break;
-
-        case SRXL_PARAM_ID:
-            if (g_use_colors) printf("%s", COLOR_CYAN);
-            printf("    %s Type: PARAMETER\n", EMOJI_PARAM);
-            if (g_use_colors) printf("%s", COLOR_RESET);
+        case SRXL2_PKT_PARAMETER:
             g_stats.param_packets++;
             break;
-
-        case SRXL_SPM_INTERNAL:
-            if (g_use_colors) printf("%s", COLOR_MAGENTA);
-            printf("    💓 Type: INTERNAL (Heartbeat)\n");
-            if (length >= 5 + sizeof(SrxlInternalData))
-            {
-                printf("    Source: 0x%02X\n", packet[3]);
-                printf("    Dest: 0x%02X\n", packet[4]);
-                printf("    Test: %u\n", packet[5]);
-            }
-            if (g_use_colors) printf("%s", COLOR_RESET);
+        case SRXL2_PKT_SPM_INTERNAL:
+            g_stats.internal_packets++;
             break;
-
         default:
-            if (g_use_colors) printf("%s", COLOR_RED);
-            printf("    %s Type: UNKNOWN (0x%02X)\n", EMOJI_UNKNOWN, packetType);
-            if (g_use_colors) printf("%s", COLOR_RESET);
             g_stats.unknown_packets++;
             break;
     }
 
-    if (g_show_hex)
-    {
-        print_hex(packet, length);
+    if (g_show_hex) {
+        printf("    Hex: ");
+        for (size_t i = 0; i < length; i++) {
+            printf("%02X ", data[i]);
+            if ((i + 1) % 16 == 0 && i < length - 1)
+                printf("\n         ");
+        }
+        printf("\n");
     }
 
-    g_stats.total_packets++;
+    printf("\n");
+    fflush(stdout);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Main Program
+// Format: State (ncurses-based live view)
 ///////////////////////////////////////////////////////////////////////////////
 
-int main(int argc, char* argv[])
-{
-    printf("╔═══════════════════════════════════════════════╗\n");
-    printf("║       SRXL2 Bus Sniffer                       ║\n");
-    printf("╚═══════════════════════════════════════════════╝\n");
-    printf("\n");
+#ifdef HAVE_NCURSES
+#include <ncurses.h>
 
-    // Parse arguments
-    const char* busName = "srxl2bus";
-    for (int i = 1; i < argc; ++i)
-    {
-        if (strcmp(argv[i], "--hex") == 0)
-        {
-            g_show_hex = true;
+static const char* get_device_icon(uint8_t device_id)
+{
+    srxl2_device_type_t type = srxl2_get_device_type(device_id);
+    switch (type) {
+        case SRXL2_DEV_FLIGHT_CONTROLLER: return "[FC]";
+        case SRXL2_DEV_ESC: return "[ESC]";
+        case SRXL2_DEV_RECEIVER: return "[RX]";
+        case SRXL2_DEV_REMOTE_RECEIVER: return "[RRX]";
+        case SRXL2_DEV_VTX: return "[VTX]";
+        case SRXL2_DEV_SENSOR: return "[SNS]";
+        case SRXL2_DEV_SERVO_1:
+        case SRXL2_DEV_SERVO_2: return "[SRV]";
+        case SRXL2_DEV_EXTERNAL_RF: return "[RF]";
+        case SRXL2_DEV_REMOTE_ID: return "[RID]";
+        case SRXL2_DEV_BROADCAST: return "[BRD]";
+        case SRXL2_DEV_NONE:
+        default:
+            return "[???]";
+    }
+}
+
+static void update_state_display(void)
+{
+    clear();
+
+    // Header
+    attron(A_BOLD | COLOR_PAIR(1));
+    mvprintw(0, 0, "SRXL2 Bus Sniffer - Live State View");
+    attroff(A_BOLD | COLOR_PAIR(1));
+
+    mvprintw(1, 0, "Press Ctrl+C to exit");
+    mvprintw(2, 0, "--------------------------------------------------------------------------------");
+
+    // Statistics
+    mvprintw(3, 0, "Total: %llu", (unsigned long long)g_stats.total_packets);
+    mvprintw(3, 20, "Handshake: %llu", (unsigned long long)g_stats.handshake_packets);
+    mvprintw(3, 40, "Control: %llu", (unsigned long long)g_stats.channel_packets);
+    mvprintw(3, 60, "Telemetry: %llu", (unsigned long long)g_stats.telemetry_packets);
+
+    mvprintw(4, 0, "--------------------------------------------------------------------------------");
+
+    // Device list with tree structure
+    uint64_t now = get_timestamp_us();
+    int row = 5;
+
+    for (int i = 0; i < g_device_count && row < LINES - 2; i++) {
+        device_state_t* dev = &g_devices[i];
+        uint64_t age_ms = (now - dev->last_seen) / 1000;
+
+        // Device header line with icon
+        attron(A_BOLD | COLOR_PAIR(2));
+        mvprintw(row, 0, "%s 0x%02X", get_device_icon(dev->device_id), dev->device_id);
+        attroff(A_BOLD | COLOR_PAIR(2));
+
+        mvprintw(row, 14, "%-16s", srxl2_device_type_name(srxl2_get_device_type(dev->device_id)));
+
+        // RSSI with color coding
+        if (dev->rssi != 0) {
+            if (dev->rssi < 0) {
+                // dBm
+                if (dev->rssi > -70) attron(COLOR_PAIR(2));  // Green
+                else if (dev->rssi > -85) attron(COLOR_PAIR(3));  // Yellow
+                else attron(COLOR_PAIR(4));  // Red
+                mvprintw(row, 28, "RSSI:%4ddBm", dev->rssi);
+            } else {
+                // Percent
+                if (dev->rssi > 70) attron(COLOR_PAIR(2));
+                else if (dev->rssi > 40) attron(COLOR_PAIR(3));
+                else attron(COLOR_PAIR(4));
+                mvprintw(row, 28, "RSSI:%3d%%", dev->rssi);
+            }
+            attroff(COLOR_PAIR(2) | COLOR_PAIR(3) | COLOR_PAIR(4));
         }
-        else if (strcmp(argv[i], "--no-color") == 0)
-        {
-            g_use_colors = false;
+
+        mvprintw(row, 42, "Pkts:%llu", (unsigned long long)dev->packet_count);
+        mvprintw(row, 54, "Age:%llums", (unsigned long long)age_ms);
+        row++;
+
+        // Channel data (only show active channels, up to 10)
+        int active_channels = __builtin_popcount(dev->channel_mask);
+        if (active_channels > 0) {
+            mvprintw(row, 2, "+- Channels (%d active):", active_channels);
+            row++;
+
+            int channels_shown = 0;
+            for (int ch = 0; ch < 32 && channels_shown < 10; ch++) {
+                if (dev->channel_mask & (1 << ch)) {
+                    if (channels_shown % 5 == 0) {
+                        if (channels_shown > 0) row++;
+                        mvprintw(row, 2, "|  ");
+                    }
+                    mvprintw(row, 5 + (channels_shown % 5) * 14, "CH%02d:%4d",
+                             ch + 1, dev->channels[ch]);
+                    channels_shown++;
+                }
+            }
+            row++;
         }
-        else if (strcmp(argv[i], "--show-internal") == 0)
-        {
-            g_show_internal = true;
+
+        // Telemetry sensors (tree structure)
+        if (dev->telemetry_count > 0) {
+            mvprintw(row, 2, "+- Telemetry (%d sensors):", dev->telemetry_count);
+            row++;
+
+            for (int t = 0; t < dev->telemetry_count && row < LINES - 2; t++) {
+                telemetry_sensor_t* sensor = &dev->telemetry[t];
+                uint64_t sensor_age_ms = (now - sensor->last_seen) / 1000;
+
+                const char* connector = (t == dev->telemetry_count - 1) ? "  " : "| ";
+                mvprintw(row, 5, "%s Sensor 0x%02X: ", connector, sensor->sensor_id);
+
+                // Show first few bytes of telemetry data
+                int col = 25;
+                for (int b = 0; b < sensor->data_len && b < 8 && col < COLS - 15; b++) {
+                    mvprintw(row, col, "%02X ", sensor->raw_data[b]);
+                    col += 3;
+                }
+
+                mvprintw(row, col, "(%llums)", (unsigned long long)sensor_age_ms);
+                row++;
+            }
         }
-        else
-        {
-            busName = argv[i];
+
+        // Blank line between devices
+        row++;
+    }
+
+    refresh();
+}
+
+static void output_state_init(void)
+{
+    initscr();
+    cbreak();
+    noecho();
+    nodelay(stdscr, TRUE);
+    curs_set(0);
+
+    if (has_colors()) {
+        start_color();
+        init_pair(1, COLOR_CYAN, COLOR_BLACK);    // Header
+        init_pair(2, COLOR_GREEN, COLOR_BLACK);   // Good/Device name
+        init_pair(3, COLOR_YELLOW, COLOR_BLACK);  // Warning
+        init_pair(4, COLOR_RED, COLOR_BLACK);     // Error/Poor
+    }
+
+    update_state_display();
+}
+
+static void output_state_cleanup(void)
+{
+    endwin();
+}
+
+// Helper to extract device ID from sender name (e.g., "Battery" -> 0xB1)
+static uint8_t extract_device_id_from_sender(const char* sender)
+{
+    // For simulators, try to infer device ID from name
+    if (strstr(sender, "Master") || strstr(sender, "master")) {
+        return 0x10;  // Remote receiver master
+    } else if (strstr(sender, "Battery") || strstr(sender, "battery")) {
+        return 0xB1;  // Sensor (battery) device 1
+    }
+    // For serial, sender is just "serial", so we can't infer
+    return 0;
+}
+
+static void output_state_packet_with_sender(const srxl2_packet_t* packet, const char* sender)
+{
+    uint64_t now = get_timestamp_us();
+
+    // Try to infer sending device from sender name
+    uint8_t sender_device_id = extract_device_id_from_sender(sender);
+
+    // Update device state
+    if (packet->header.packet_type == SRXL2_PKT_HANDSHAKE) {
+        device_state_t* dev = find_or_create_device(packet->payload.handshake.src_device_id);
+        if (dev) {
+            dev->uid = packet->payload.handshake.uid;
+            dev->priority = packet->payload.handshake.priority;
+            dev->last_seen = now;
+            dev->packet_count++;
+        }
+    } else if (packet->header.packet_type == SRXL2_PKT_CONTROL) {
+        // Update from channel data - track the sender (usually master 0x10)
+        const srxl2_channel_data_t* ch = &packet->payload.control.channel_data;
+
+        // Use sender_device_id if available, otherwise assume master 0x10
+        uint8_t control_sender = (sender_device_id != 0) ? sender_device_id : 0x10;
+        device_state_t* dev = find_or_create_device(control_sender);
+        if (dev) {
+            dev->rssi = ch->rssi;
+            dev->frame_losses = ch->frame_losses;
+            dev->channel_mask = ch->channel_mask;
+            memcpy(dev->channels, ch->values, sizeof(dev->channels));
+            dev->last_seen = now;
+            dev->packet_count++;
+        }
+    } else if (packet->header.packet_type == SRXL2_PKT_TELEMETRY) {
+        // Track telemetry sender device (battery/sensor sending telemetry)
+        if (sender_device_id != 0) {
+            device_state_t* sender_dev = find_or_create_device(sender_device_id);
+            if (sender_dev) {
+                sender_dev->last_seen = now;
+                sender_dev->packet_count++;
+            }
+        }
+
+        // Also track telemetry data for destination device
+        const srxl2_telemetry_t* telem = &packet->payload.telemetry;
+        device_state_t* dest_dev = find_or_create_device(telem->dest_device_id);
+        if (dest_dev) {
+            // Telemetry data is 16 bytes, first byte is sensor ID
+            uint8_t sensor_id = telem->raw[0];
+
+            // Find or create sensor
+            telemetry_sensor_t* sensor = NULL;
+            for (int i = 0; i < dest_dev->telemetry_count; i++) {
+                if (dest_dev->telemetry[i].sensor_id == sensor_id) {
+                    sensor = &dest_dev->telemetry[i];
+                    break;
+                }
+            }
+
+            if (!sensor && dest_dev->telemetry_count < MAX_TELEMETRY_SENSORS) {
+                sensor = &dest_dev->telemetry[dest_dev->telemetry_count++];
+                sensor->sensor_id = sensor_id;
+            }
+
+            if (sensor) {
+                // Copy all 16 bytes of telemetry data
+                sensor->data_len = 16;
+                memcpy(sensor->raw_data, telem->raw, 16);
+                sensor->last_seen = now;
+            }
+
+            dest_dev->last_seen = now;
+            dest_dev->packet_count++;
         }
     }
 
-    printf("Configuration:\n");
-    printf("  Bus name: %s\n", busName);
-    printf("  Hex dump: %s\n", g_show_hex ? "enabled" : "disabled");
-    printf("  Colors: %s\n", g_use_colors ? "enabled" : "disabled");
-    printf("  Show internal: %s\n", g_show_internal ? "yes" : "no (use --show-internal to enable)");
-    printf("\n");
+    // Update display every 100ms
+    static uint64_t last_update = 0;
+    if (now - last_update > 100000) {
+        update_state_display();
+        last_update = now;
+    }
+}
+#else
+static void output_state_init(void) {
+    fprintf(stderr, "State format requires ncurses support (not compiled in)\n");
+    exit(1);
+}
+static void output_state_cleanup(void) {}
+static void output_state_packet_with_sender(const srxl2_packet_t* packet, const char* sender) {
+    (void)packet;
+    (void)sender;
+}
+#endif
+
+///////////////////////////////////////////////////////////////////////////////
+// Packet Processing
+///////////////////////////////////////////////////////////////////////////////
+
+static void process_packet(const uint8_t* data, size_t length, const char* sender)
+{
+    srxl2_packet_t packet;
+    srxl2_parse_result_t result = srxl2_parse_packet(data, length, &packet);
+
+    // Filter internal packets
+    if (!g_show_internal && length >= 2 && data[1] == SRXL2_PKT_SPM_INTERNAL) {
+        return;
+    }
+
+    g_packet_count++;
+    uint64_t timestamp = get_timestamp_us();
+
+    if (result != SRXL2_PARSE_OK) {
+        g_stats.invalid_packets++;
+        if (g_format == FORMAT_DETAILS) {
+            if (g_use_colors) printf("%s", ANSI_RED);
+            printf("❌ [INVALID] %s\n", srxl2_parse_result_str(result));
+            if (g_use_colors) printf("%s", ANSI_RESET);
+        }
+        return;
+    }
+
+    g_stats.total_packets++;
+
+    // Output based on format
+    switch (g_format) {
+        case FORMAT_DETAILS:
+            output_details_packet(&packet, timestamp, sender, data, length);
+            break;
+        case FORMAT_JSON:
+            output_json_packet(&packet, timestamp, sender, length);
+            break;
+        case FORMAT_ONELINE:
+            output_oneline_packet(&packet, timestamp, sender);
+            break;
+        case FORMAT_STATE:
+            output_state_packet_with_sender(&packet, sender);
+            break;
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Main
+///////////////////////////////////////////////////////////////////////////////
+
+static void print_usage(const char* prog)
+{
+    printf("Usage: %s [options]\n", prog);
+    printf("\nTransport Options:\n");
+    printf("  --device <name>      Device (bus name or /dev/ttyUSB0)\n");
+    printf("  --serial             Use USB-to-serial instead of fakeuart\n");
+    printf("  --baud <rate>        Baud rate: 115200 or 400000 (default: 115200)\n");
+    printf("  --list-ports         List available serial ports and exit\n");
+    printf("\nOutput Options:\n");
+    printf("  --format <fmt>       Output format (default: details)\n");
+    printf("                       details  - Detailed view with packet contents\n");
+    printf("                       json     - JSON output (one per line)\n");
+    printf("                       oneline  - Compact one-line per packet\n");
+    printf("                       state    - Live state view (ncurses)\n");
+    printf("  --hex                Show hex dump (details format only)\n");
+    printf("  --no-color           Disable colors\n");
+    printf("  --show-internal      Show internal heartbeat packets\n");
+    printf("\nExamples:\n");
+    printf("  %s --device srxl2bus\n", prog);
+    printf("  %s --serial --device /dev/ttyUSB0 --baud 115200\n", prog);
+    printf("  %s --format json > capture.jsonl\n", prog);
+    printf("  %s --format state\n", prog);
+}
+
+int main(int argc, char* argv[])
+{
+    const char* device = "srxl2bus";
+    bool use_serial = false;
+    transport_baud_t baud = TRANSPORT_BAUD_115200;
+
+    // Parse arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "--list-ports") == 0) {
+            transport_list_serial_ports();
+            return 0;
+        } else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
+            device = argv[++i];
+        } else if (strcmp(argv[i], "--serial") == 0) {
+            use_serial = true;
+        } else if (strcmp(argv[i], "--baud") == 0 && i + 1 < argc) {
+            int rate = atoi(argv[++i]);
+            if (rate == 115200) baud = TRANSPORT_BAUD_115200;
+            else if (rate == 400000) baud = TRANSPORT_BAUD_400000;
+            else {
+                fprintf(stderr, "Invalid baud rate (use 115200 or 400000)\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--format") == 0 && i + 1 < argc) {
+            const char* fmt = argv[++i];
+            if (strcmp(fmt, "details") == 0) g_format = FORMAT_DETAILS;
+            else if (strcmp(fmt, "json") == 0) g_format = FORMAT_JSON;
+            else if (strcmp(fmt, "oneline") == 0) g_format = FORMAT_ONELINE;
+            else if (strcmp(fmt, "state") == 0) g_format = FORMAT_STATE;
+            else {
+                fprintf(stderr, "Invalid format (use: details, json, oneline, state)\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--hex") == 0) {
+            g_show_hex = true;
+        } else if (strcmp(argv[i], "--no-color") == 0) {
+            g_use_colors = false;
+        } else if (strcmp(argv[i], "--show-internal") == 0) {
+            g_show_internal = true;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    // Initialize transport
+    transport_type_t type = use_serial ? TRANSPORT_TYPE_SERIAL : TRANSPORT_TYPE_FAKEUART;
+    g_transport = transport_init(type, device, "Sniffer", baud);
+    if (!g_transport) {
+        fprintf(stderr, "Failed to initialize transport\n");
+        return 1;
+    }
+
+    transport_set_promiscuous(g_transport, true);
 
     // Setup signal handler
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Initialize fake UART in promiscuous mode
-    if (!fakeuart_init(busName, "Sniffer"))
-    {
-        fprintf(stderr, "Failed to initialize fake UART\n");
-        return 1;
+    // Initialize output format
+    if (g_format == FORMAT_STATE) {
+        output_state_init();
+    } else if (g_format == FORMAT_DETAILS) {
+        printf("╔═══════════════════════════════════════════════╗\n");
+        printf("║       SRXL2 Bus Sniffer - Details View       ║\n");
+        printf("╚═══════════════════════════════════════════════╝\n");
+        printf("\nListening on %s (%s)... Press Ctrl+C to exit\n\n",
+               device, use_serial ? "serial" : "fakeuart");
     }
 
-    fakeuart_set_promiscuous(true);
-
-    printf("[Sniffer] Listening on bus (press Ctrl+C to exit)\n");
-    printf("═══════════════════════════════════════════════\n");
-    printf("\n");
-
-    // Receive buffer
-    uint8_t buffer[SRXL_MAX_BUFFER_SIZE];
+    // Main loop
+    uint8_t buffer[SRXL2_MAX_PACKET_SIZE];
     char sender[64];
 
-    // Main loop
-    while (g_running)
-    {
-        int bytesReceived = fakeuart_receive(buffer, SRXL_MAX_BUFFER_SIZE, 100,
-                                            sender, sizeof(sender));
-
-        if (bytesReceived > 0)
-        {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-
-            if (g_use_colors) printf("%s%s", COLOR_BOLD, COLOR_CYAN);
-            printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-            printf("⏱️  [%ld.%06ld] Packet #%llu (%d bytes)\n",
-                   ts.tv_sec, ts.tv_nsec / 1000,
-                   ++g_packet_count, bytesReceived);
-            if (g_use_colors) printf("%s", COLOR_RESET);
-
-            decode_packet(buffer, bytesReceived, sender);
-            printf("\n");
+    while (g_running) {
+        int bytes = transport_receive(g_transport, buffer, sizeof(buffer), 100, sender, sizeof(sender));
+        if (bytes > 0) {
+            process_packet(buffer, bytes, sender);
         }
     }
 
-    // Print statistics
-    printf("═══════════════════════════════════════════════\n");
-    printf("Statistics:\n");
-    printf("  Total packets: %llu\n", g_stats.total_packets);
-    printf("  Handshake: %llu\n", g_stats.handshake_packets);
-    printf("  Channel Data: %llu\n", g_stats.channel_packets);
-    printf("  Telemetry: %llu\n", g_stats.telemetry_packets);
-    printf("  Bind: %llu\n", g_stats.bind_packets);
-    printf("  RSSI: %llu\n", g_stats.rssi_packets);
-    printf("  Parameter: %llu\n", g_stats.param_packets);
-    printf("  Unknown: %llu\n", g_stats.unknown_packets);
-    printf("  Invalid: %llu\n", g_stats.invalid_packets);
+    // Cleanup
+    if (g_format == FORMAT_STATE) {
+        output_state_cleanup();
+    }
 
-    fakeuart_close();
+    // Print statistics (except for state format)
+    if (g_format != FORMAT_STATE && g_format != FORMAT_JSON) {
+        printf("\n═══════════════════════════════════════════════\n");
+        printf("Statistics:\n");
+        printf("  Total packets: %llu\n", (unsigned long long)g_stats.total_packets);
+        printf("  Handshake: %llu\n", (unsigned long long)g_stats.handshake_packets);
+        printf("  Channel Data: %llu\n", (unsigned long long)g_stats.channel_packets);
+        printf("  Telemetry: %llu\n", (unsigned long long)g_stats.telemetry_packets);
+        printf("  Invalid: %llu\n", (unsigned long long)g_stats.invalid_packets);
+    }
 
+    transport_close(g_transport);
     return 0;
 }

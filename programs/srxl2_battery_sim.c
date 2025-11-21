@@ -153,9 +153,11 @@ void userProvidedFillSrxlTelemetry(SrxlTelemetryData* pTelemetry)
 
 void userProvidedReceivedChannelData(SrxlChannelData* pChannelData, bool isFailsafeData)
 {
-    printf("userProvidedReceivedChannelData: pChannelData = %p, isFailsafeData = %d\n", pChannelData, isFailsafeData);
-    printf("pChannelData->chData[0] = %x\n", pChannelData->values[0]);
-    printf("pChannelData->chData[1] = %x\n", pChannelData->values[1]);
+    if (pChannelData->mask != 0) {
+        printf("userProvidedReceivedChannelData: pChannelData = %p, isFailsafeData = %d\n", pChannelData, isFailsafeData);
+        printf("pChannelData->chData[0] = %x\n", pChannelData->values[0]);
+        printf("pChannelData->chData[1] = %x\n", pChannelData->values[1]);
+    }
 }
 
 void userProvidedHandleVtxData(SrxlVtxData* pVtxData)

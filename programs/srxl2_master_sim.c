@@ -35,11 +35,9 @@ static uint8_t g_rxBufferIndex = 0;
 static uint16_t g_frameCount = 0;
 
 // Channel data (simulated RC inputs)
-static uint16_t g_channels[16] = {
+static uint16_t g_channels[] = {
     32768, 32768, 16384, 32768,  // Throttle, Aileron, Elevator, Rudder
-    32768, 32768, 32768, 32768,
-    32768, 32768, 32768, 32768,
-    32768, 32768, 32768, 32768
+    32768  // Gear
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -97,16 +95,24 @@ void srxlOnMasterHandshakeComplete(uint8_t busIndex, uint8_t deviceCount)
 bool srxlOnMasterFrame(uint8_t busIndex, uint16_t frameCount)
 {
     (void)busIndex;
-    (void)frameCount;
 
     // Update simulated channel data (slight movement for demonstration)
     static int direction = 1;
     if (frameCount % 50 == 0)
     {
-        g_channels[1] += 100 * direction;  // Aileron
+        g_channels[0] += 100 * direction;  // Throttle
         if (g_channels[1] > 40000 || g_channels[1] < 25000)
             direction = -direction;
     }
+
+    // Update channel values in the global structure every frame
+    for (int i = 0; i < 16; ++i)
+    {
+        srxlChData.values[i] = g_channels[i];
+    }
+
+    // Mark channels as outgoing every frame
+    srxlSetOutgoingChannelMask(srxlChData.mask);
 
     return false;  // Use normal behavior
 }
@@ -208,6 +214,9 @@ int main(int argc, char* argv[])
     srxlChData.mask = 0x0000FFFF;  // First 16 channels active
     srxlChData.rssi = -50;  // Good signal
     srxlChData.frameLosses = 0;
+
+    // Mark channels as outgoing initially
+    srxlSetOutgoingChannelMask(0xFFFFFFFF);
 
     // Main loop
     struct timespec lastFrameTime;

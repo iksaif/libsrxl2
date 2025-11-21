@@ -265,15 +265,6 @@ void srxlRunMaster(SrxlBus* pBus)
             break;
         }
 
-        printf("Timeout count: %d %x %dms\n", pBus->timeoutCount_ms, pBus->channelOutMask, srxlChDataIsFailsafe);
-        printf("Telemetry is too old: %d\n", telemetryIsTooOld(pBus));
-        printf("Channel out mask: %x\n", pBus->channelOutMask);
-        printf("Failsafe: %d\n", srxlChDataIsFailsafe);
-        printf("Frame count: %d\n", pMaster->frameCount);
-        printf("Request ID: %d\n", pBus->requestID);
-        printf("State: %d\n", pBus->state);
-        printf("Baud rate: %d\n", pBus->baudRate);
-
         // If we're in a timeout, we should not send anything too early
         // and let some more time to get an answer from the device.
         if (pBus->timeoutCount_ms > 0) {
@@ -285,7 +276,6 @@ void srxlRunMaster(SrxlBus* pBus)
 
         if (pBus->timeoutCount_ms >= 10 || telemetryIsTooOld(pBus) || pBus->channelOutMask || srxlChDataIsFailsafe)
         {
-            printf("Sending channel data\n");
             sendChannelData(pBus, pMaster);
             pMaster->frameCount++;
             pBus->timeoutCount_ms = 0;

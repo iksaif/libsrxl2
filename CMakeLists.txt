@@ -14,6 +14,9 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g -O0")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O2")
 
+# Find ncurses (optional for sniffer state view)
+find_package(Curses)
+
 # Global definitions
 add_definitions(-DSRXL_NUM_OF_BUSES=1)
 
@@ -24,8 +27,19 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2/Examples
     ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master
     ${CMAKE_CURRENT_SOURCE_DIR}/fakeuart
+    ${CMAKE_CURRENT_SOURCE_DIR}/libtransport
     ${CMAKE_CURRENT_SOURCE_DIR}/programs
+    ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2parser
     ${CMAKE_CURRENT_SOURCE_DIR}/SpektrumDocumentation/Telemetry
+)
+
+###############################################################################
+# SRXL2 Parser Library (standalone, zero dependencies)
+###############################################################################
+
+add_library(srxl2parser STATIC
+    libsrxl2parser/srxl2_parser.c
+    libsrxl2parser/srxl2_parser.h
 )
 
 ###############################################################################
@@ -36,6 +50,17 @@ add_library(fakeuart STATIC
     fakeuart/fakeuart.c
     fakeuart/fakeuart.h
 )
+
+###############################################################################
+# Transport Library (abstraction over fakeuart and serial)
+###############################################################################
+
+add_library(transport STATIC
+    libtransport/transport.c
+    libtransport/transport.h
+)
+
+target_link_libraries(transport fakeuart)
 
 ###############################################################################
 # SRXL2 Official Library
@@ -62,7 +87,6 @@ target_include_directories(srxl2 BEFORE PRIVATE
 add_library(srxl2_master STATIC
     SRXL2_Master/spm_srxl_master.c
     SRXL2_Master/spm_srxl_master.h
-    SRXL2_Master/spm_srxl_master_config.h
 )
 
 # Enable master code for this library
@@ -92,8 +116,15 @@ target_compile_definitions(srxl2_master_sim PRIVATE
     SRXL_ENABLE_INTERNAL
 )
 
+# Use our custom config header by ensuring programs directory is searched first
+# and explicitly excluding the default config from SRXL2_Master
 target_include_directories(srxl2_master_sim BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/programs
+)
+
+# Add compiler flag to use our custom config by changing include search behavior
+target_compile_options(srxl2_master_sim PRIVATE
+    -iquote ${CMAKE_CURRENT_SOURCE_DIR}/programs
 )
 
 target_link_libraries(srxl2_master_sim
@@ -121,18 +152,27 @@ add_executable(srxl2_sniffer
     programs/srxl2_sniffer.c
 )
 
-# Enable internal packets for decoding
-target_compile_definitions(srxl2_sniffer PRIVATE
-    SRXL_ENABLE_INTERNAL
-)
-
 target_include_directories(srxl2_sniffer BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/programs
 )
 
-target_link_libraries(srxl2_sniffer
-    fakeuart
-)
+# Enable ncurses support if available
+if(CURSES_FOUND)
+    target_compile_definitions(srxl2_sniffer PRIVATE HAVE_NCURSES)
+    target_include_directories(srxl2_sniffer PRIVATE ${CURSES_INCLUDE_DIRS})
+    target_link_libraries(srxl2_sniffer
+        srxl2parser
+        transport
+        ${CURSES_LIBRARIES}
+    )
+    message(STATUS "Building sniffer with ncurses support (state format available)")
+else()
+    target_link_libraries(srxl2_sniffer
+        srxl2parser
+        transport
+    )
+    message(STATUS "Building sniffer without ncurses support (state format unavailable)")
+endif()
 
 ###############################################################################
 # SRXL2_Master Examples (optional)
@@ -157,26 +197,25 @@ install(TARGETS
 )
 
 install(TARGETS
+    srxl2parser
+    transport
     fakeuart
-    srxl2
-    srxl2_master
     DESTINATION lib
+)
+
+install(FILES
+    libsrxl2parser/srxl2_parser.h
+    DESTINATION include/srxl2parser
+)
+
+install(FILES
+    libtransport/transport.h
+    DESTINATION include/transport
 )
 
 install(FILES
     fakeuart/fakeuart.h
     DESTINATION include/fakeuart
-)
-
-install(FILES
-    SRXL2/Source/spm_srxl.h
-    DESTINATION include/srxl2
-)
-
-install(FILES
-    SRXL2_Master/spm_srxl_master.h
-    SRXL2_Master/spm_srxl_master_config.h
-    DESTINATION include/srxl2_master
 )
 
 ###############################################################################
