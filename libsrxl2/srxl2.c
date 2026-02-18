@@ -256,8 +256,10 @@ static void on_handshake(srxl2_ctx_t *ctx, const srxl2_pkt_handshake_t *hs)
         }
 
         /* Late join: unprompted handshake (dest=0) while running --
-           send broadcast so the new device transitions to Running */
-        if (hs->dest_id == 0x00 && ctx->state == SRXL2_STATE_RUNNING) {
+           send broadcast so the new device transitions to Running.
+           Re-check is_master since master election above may have cleared it. */
+        if (ctx->is_master &&
+            hs->dest_id == 0x00 && ctx->state == SRXL2_STATE_RUNNING) {
             master_send_handshake(ctx, 0xFF);
         }
     } else {
