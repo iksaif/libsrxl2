@@ -13,7 +13,6 @@ SRXL2 bus master and protocol stack for controlling Spektrum Smart ESCs and read
 ├── libtransport/       Abstraction over fakeuart and serial ports
 ├── programs/           Simulation programs
 ├── tests/              Test suite (11 tests)
-├── doc/                Protocol specs and analysis docs
 └── SpektrumDocumentation/  Spektrum telemetry definitions (submodule)
 ```
 
@@ -28,7 +27,7 @@ Context-based C11 library supporting both master and slave roles. No globals, no
 
 ### Legacy (SRXL2 + SRXL2_Master)
 
-The official Spektrum library with a custom master implementation. Still works, but has known issues (see `doc/master-analysis.md`). Kept for reference and interop testing.
+The official Spektrum library with a custom master implementation. Still works, but has known issues. Kept for reference and interop testing.
 
 ## Building
 
@@ -100,13 +99,6 @@ Key packet types:
 - `0xCD` Control Data -- RC channels + telemetry poll
 - `0x80` Telemetry -- 16-byte X-Bus sensor payload
 - `0x41` Bind -- bind mode management
-
-## Documentation
-
-- `doc/master-analysis.md` -- Analysis of known issues and roadmap
-- `doc/msrc-analysis.md` -- How MSRC implements SRXL2 slave
-- `doc/SRXL2 Specification.md` -- Protocol specification
-- `doc/reimplementation-proposal.md` -- Design rationale for libsrxl2
 
 ## License
 
