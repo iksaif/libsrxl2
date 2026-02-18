@@ -177,11 +177,33 @@ int main(int argc, char* argv[])
     printf("\n");
 
     // Parse arguments
-    const char* busName = (argc > 1) ? argv[1] : "srxl2bus";
+    const char* busName = "srxl2bus";
+    uint8_t deviceID = 0xB0;
+
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "--bus") == 0 || strcmp(argv[i], "-b") == 0) && i + 1 < argc) {
+            busName = argv[++i];
+        } else if ((strcmp(argv[i], "--id") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
+            unsigned long val = strtoul(argv[++i], NULL, 0);
+            if ((val & 0xF0) != 0xB0 || val > 0xBF) {
+                fprintf(stderr, "Device ID must be in range 0xB0-0xBF (Sensor type)\n");
+                return 1;
+            }
+            deviceID = (uint8_t)val;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: %s [--bus <name>] [--id <0xB0-0xBF>]\n", argv[0]);
+            printf("  --bus, -b   Bus name (default: srxl2bus)\n");
+            printf("  --id,  -i   Device ID (default: 0xB0)\n");
+            return 0;
+        } else {
+            // Legacy: positional argument is bus name
+            busName = argv[i];
+        }
+    }
 
     printf("Configuration:\n");
     printf("  Bus name: %s\n", busName);
-    printf("  Device ID: 0xB1 (Sensor, Unit 1)\n");
+    printf("  Device ID: 0x%02X (Sensor, Unit %u)\n", deviceID, deviceID & 0x0F);
     printf("  Role: Telemetry Device (Slave)\n");
     printf("  Battery: 4S LiPo, %.0f mAh\n", g_battery.capacity_total);
     printf("\n");
@@ -197,10 +219,9 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Initialize SRXL2 as sensor device (device ID 0xB1 = slave device)
-    // Unit ID must be non-zero (1-15) to act as slave, not master
+    // Initialize SRXL2 as sensor device
     uint32_t uniqueID = 0xAABBCCDD;
-    if (!srxlInitDevice(0xB1, 30, SRXL_DEVINFO_NO_RF, uniqueID))
+    if (!srxlInitDevice(deviceID, 30, SRXL_DEVINFO_NO_RF, uniqueID))
     {
         fprintf(stderr, "Failed to initialize SRXL2 device\n");
         fakeuart_close();
@@ -286,11 +307,10 @@ int main(int argc, char* argv[])
                 g_rxBufferIndex = 0;
             }
         }
-        else
-        {
-            // Assume 5ms because it's our read timeout.
-            srxlRun(0, 5);
-        }
+        // Always run the state machine -- use 0 when we just received data
+        // (timeout was reset by srxlParsePacket), else assume 5ms elapsed
+        // (our read timeout).
+        srxlRun(0, bytesReceived > 0 ? 0 : 5);
 
         // Update battery simulation
         struct timespec currentTime;

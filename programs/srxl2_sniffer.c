@@ -32,8 +32,9 @@ Usage: ./srxl2_sniffer [options]
 #include <signal.h>
 #include <time.h>
 
-// Include SRXL2 parser library
-#include "srxl2_parser.h"
+// Include libsrxl2
+#include "srxl2.h"
+#include "srxl2_packet.h"
 
 // Include transport library
 #include "transport.h"
@@ -166,7 +167,7 @@ static void json_escape(const char* str)
 // Format: JSON
 ///////////////////////////////////////////////////////////////////////////////
 
-static void output_json_packet(const srxl2_packet_t* packet, uint64_t timestamp, const char* sender, size_t length)
+static void output_json_packet(const srxl2_decoded_pkt_t* pkt, uint64_t timestamp, const char* sender, size_t length)
 {
     printf("{");
     printf("\"timestamp\":%llu,", (unsigned long long)timestamp);
@@ -176,39 +177,36 @@ static void output_json_packet(const srxl2_packet_t* packet, uint64_t timestamp,
     json_escape(sender);
     printf("\",");
     printf("\"type\":\"");
-    json_escape(srxl2_packet_type_name((srxl2_packet_type_t)packet->header.packet_type));
+    json_escape(srxl2_packet_type_name(pkt->packet_type));
     printf("\",");
-    printf("\"type_id\":\"0x%02X\",", packet->header.packet_type);
+    printf("\"type_id\":\"0x%02X\",", pkt->packet_type);
 
-    switch (packet->header.packet_type) {
+    switch (pkt->packet_type) {
         case SRXL2_PKT_HANDSHAKE: {
-            const srxl2_handshake_t* hs = &packet->payload.handshake;
             printf("\"data\":{");
-            printf("\"src\":\"0x%02X\",", hs->src_device_id);
-            printf("\"dest\":\"0x%02X\",", hs->dest_device_id);
-            printf("\"priority\":%u,", hs->priority);
-            printf("\"baud\":%u,", hs->baud_supported & SRXL2_BAUD_400000 ? 400000 : 115200);
-            printf("\"uid\":\"0x%08X\"", hs->uid);
+            printf("\"src\":\"0x%02X\",", pkt->handshake.src_id);
+            printf("\"dest\":\"0x%02X\",", pkt->handshake.dest_id);
+            printf("\"priority\":%u,", pkt->handshake.priority);
+            printf("\"baud\":%u,", pkt->handshake.baud_supported & SRXL2_BAUD_400000 ? 400000 : 115200);
+            printf("\"uid\":\"0x%08X\"", pkt->handshake.uid);
             printf("}");
             break;
         }
         case SRXL2_PKT_CONTROL: {
-            const srxl2_control_t* ctrl = &packet->payload.control;
             printf("\"data\":{");
-            printf("\"cmd\":%u,", ctrl->cmd);
-            printf("\"reply_id\":\"0x%02X\",", ctrl->reply_id);
-            printf("\"rssi\":%d,", ctrl->channel_data.rssi);
-            printf("\"frame_losses\":%u,", ctrl->channel_data.frame_losses);
-            printf("\"channel_mask\":\"0x%08X\",", ctrl->channel_data.channel_mask);
-            printf("\"num_channels\":%u", ctrl->channel_data.num_channels);
+            printf("\"cmd\":%u,", pkt->control.cmd);
+            printf("\"reply_id\":\"0x%02X\",", pkt->control.reply_id);
+            printf("\"rssi\":%d,", pkt->control.channel.rssi);
+            printf("\"frame_losses\":%u,", pkt->control.channel.frame_losses);
+            printf("\"channel_mask\":\"0x%08X\",", pkt->control.channel.mask);
+            printf("\"num_channels\":%u", pkt->control.channel.num_channels);
             printf("}");
             break;
         }
         case SRXL2_PKT_TELEMETRY: {
-            const srxl2_telemetry_t* telem = &packet->payload.telemetry;
             printf("\"data\":{");
-            printf("\"dest\":\"0x%02X\",", telem->dest_device_id);
-            printf("\"sensor_id\":\"0x%02X\"", telem->raw[0]);
+            printf("\"dest\":\"0x%02X\",", pkt->telemetry.dest_id);
+            printf("\"sensor_id\":\"0x%02X\"", pkt->telemetry.payload[0]);
             printf("}");
             break;
         }
@@ -225,7 +223,7 @@ static void output_json_packet(const srxl2_packet_t* packet, uint64_t timestamp,
 // Format: Oneline
 ///////////////////////////////////////////////////////////////////////////////
 
-static void output_oneline_packet(const srxl2_packet_t* packet, uint64_t timestamp, const char* sender)
+static void output_oneline_packet(const srxl2_decoded_pkt_t* pkt, uint64_t timestamp, const char* sender)
 {
     // Timestamp
     if (g_use_colors) printf("%s", ANSI_CYAN);
@@ -242,40 +240,40 @@ static void output_oneline_packet(const srxl2_packet_t* packet, uint64_t timesta
     if (g_use_colors) printf("%s", ANSI_RESET);
 
     // Packet type with emoji and color
-    const char* emoji = "📦";
+    const char* emoji = "?";
     const char* color = ANSI_RESET;
 
-    switch (packet->header.packet_type) {
+    switch (pkt->packet_type) {
         case SRXL2_PKT_HANDSHAKE:
-            emoji = "🤝";
+            emoji = "HS";
             color = ANSI_YELLOW;
             break;
         case SRXL2_PKT_CONTROL:
-            emoji = "📡";
+            emoji = "CD";
             color = ANSI_BLUE;
             break;
         case SRXL2_PKT_TELEMETRY:
-            emoji = "📊";
+            emoji = "TL";
             color = ANSI_GREEN;
             break;
         case SRXL2_PKT_BIND:
-            emoji = "🔗";
+            emoji = "BD";
             color = ANSI_MAGENTA;
             break;
         case SRXL2_PKT_RSSI:
-            emoji = "📶";
+            emoji = "RS";
             color = ANSI_YELLOW;
             break;
-        case SRXL2_PKT_PARAMETER:
-            emoji = "⚙️";
+        case 0x50: /* Parameter */
+            emoji = "PM";
             color = ANSI_CYAN;
             break;
-        case SRXL2_PKT_SPM_INTERNAL:
-            emoji = "💓";
+        case 0x99: /* Internal */
+            emoji = "IN";
             color = ANSI_MAGENTA;
             break;
         default:
-            emoji = "❓";
+            emoji = "??";
             color = ANSI_RED;
             break;
     }
@@ -283,34 +281,34 @@ static void output_oneline_packet(const srxl2_packet_t* packet, uint64_t timesta
     if (g_use_colors) printf(" %s%s", color, emoji);
     else printf(" %s", emoji);
 
-    printf(" %-12s", srxl2_packet_type_name((srxl2_packet_type_t)packet->header.packet_type));
+    printf(" %-12s", srxl2_packet_type_name(pkt->packet_type));
     if (g_use_colors) printf("%s", ANSI_RESET);
 
     // Packet-specific data
-    switch (packet->header.packet_type) {
+    switch (pkt->packet_type) {
         case SRXL2_PKT_HANDSHAKE:
             printf(" src=");
             if (g_use_colors) printf("%s", ANSI_YELLOW);
-            printf("0x%02X", packet->payload.handshake.src_device_id);
+            printf("0x%02X", pkt->handshake.src_id);
             if (g_use_colors) printf("%s", ANSI_RESET);
 
             printf(" dest=");
             if (g_use_colors) printf("%s", ANSI_YELLOW);
-            printf("0x%02X", packet->payload.handshake.dest_device_id);
+            printf("0x%02X", pkt->handshake.dest_id);
             if (g_use_colors) printf("%s", ANSI_RESET);
 
             printf(" uid=");
             if (g_use_colors) printf("%s", ANSI_CYAN);
-            printf("0x%08X", packet->payload.handshake.uid);
+            printf("0x%08X", pkt->handshake.uid);
             if (g_use_colors) printf("%s", ANSI_RESET);
             break;
 
         case SRXL2_PKT_CONTROL: {
-            int8_t rssi = packet->payload.control.channel_data.rssi;
+            int8_t rssi = pkt->control.channel.rssi;
 
             printf(" reply=");
             if (g_use_colors) printf("%s", ANSI_CYAN);
-            printf("0x%02X", packet->payload.control.reply_id);
+            printf("0x%02X", pkt->control.reply_id);
             if (g_use_colors) printf("%s", ANSI_RESET);
 
             printf(" rssi=");
@@ -333,7 +331,7 @@ static void output_oneline_packet(const srxl2_packet_t* packet, uint64_t timesta
 
             printf(" ch=");
             if (g_use_colors) printf("%s", ANSI_BLUE);
-            printf("%u", packet->payload.control.channel_data.num_channels);
+            printf("%u", pkt->control.channel.num_channels);
             if (g_use_colors) printf("%s", ANSI_RESET);
             break;
         }
@@ -341,24 +339,24 @@ static void output_oneline_packet(const srxl2_packet_t* packet, uint64_t timesta
         case SRXL2_PKT_TELEMETRY:
             printf(" dest=");
             if (g_use_colors) printf("%s", ANSI_GREEN);
-            printf("0x%02X", packet->payload.telemetry.dest_device_id);
+            printf("0x%02X", pkt->telemetry.dest_id);
             if (g_use_colors) printf("%s", ANSI_RESET);
 
             printf(" sensor=");
             if (g_use_colors) printf("%s", ANSI_GREEN);
-            printf("0x%02X", packet->payload.telemetry.raw[0]);
+            printf("0x%02X", pkt->telemetry.payload[0]);
             if (g_use_colors) printf("%s", ANSI_RESET);
             break;
 
         case SRXL2_PKT_BIND:
             printf(" request=");
             if (g_use_colors) printf("%s", ANSI_MAGENTA);
-            printf("0x%02X", packet->payload.bind.request);
+            printf("0x%02X", pkt->bind.request);
             if (g_use_colors) printf("%s", ANSI_RESET);
 
             printf(" device=");
             if (g_use_colors) printf("%s", ANSI_MAGENTA);
-            printf("0x%02X", packet->payload.bind.device_id);
+            printf("0x%02X", pkt->bind.device_id);
             if (g_use_colors) printf("%s", ANSI_RESET);
             break;
 
@@ -374,52 +372,50 @@ static void output_oneline_packet(const srxl2_packet_t* packet, uint64_t timesta
 // Format: Details (original format)
 ///////////////////////////////////////////////////////////////////////////////
 
-static void output_details_packet(const srxl2_packet_t* packet, uint64_t timestamp, const char* sender, const uint8_t* data, size_t length)
+static void output_details_packet(const srxl2_decoded_pkt_t* pkt, uint64_t timestamp, const char* sender, const uint8_t* data, size_t length)
 {
     if (g_use_colors) printf("%s%s", ANSI_BOLD, ANSI_CYAN);
-    printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    printf("⏱️  [%llu.%06llu] Packet #%llu (%zu bytes)\n",
+    printf("--------------------------------------------\n");
+    printf("  [%llu.%06llu] Packet #%llu (%zu bytes)\n",
            (unsigned long long)(timestamp / 1000000),
            (unsigned long long)(timestamp % 1000000),
            (unsigned long long)g_packet_count,
            length);
-    printf("  📤 From: %s\n", sender);
-    printf("  Packet Type: 0x%02X (%s)\n", packet->header.packet_type,
-           srxl2_packet_type_name((srxl2_packet_type_t)packet->header.packet_type));
+    printf("  From: %s\n", sender);
+    printf("  Packet Type: 0x%02X (%s)\n", pkt->packet_type,
+           srxl2_packet_type_name(pkt->packet_type));
     if (g_use_colors) printf("%s", ANSI_RESET);
 
     // Decode packet details
-    switch (packet->header.packet_type) {
+    switch (pkt->packet_type) {
         case SRXL2_PKT_HANDSHAKE: {
-            const srxl2_handshake_t* hs = &packet->payload.handshake;
             if (g_use_colors) printf("%s", ANSI_YELLOW);
             printf("    Source: 0x%02X (%s, Unit %u)\n",
-                   hs->src_device_id,
-                   srxl2_device_type_name(srxl2_get_device_type(hs->src_device_id)),
-                   srxl2_get_unit_id(hs->src_device_id));
-            printf("    Dest: 0x%02X\n", hs->dest_device_id);
-            printf("    Priority: %u\n", hs->priority);
-            printf("    UID: 0x%08X\n", hs->uid);
+                   pkt->handshake.src_id,
+                   srxl2_device_type_name(srxl2_device_type(pkt->handshake.src_id)),
+                   srxl2_unit_id(pkt->handshake.src_id));
+            printf("    Dest: 0x%02X\n", pkt->handshake.dest_id);
+            printf("    Priority: %u\n", pkt->handshake.priority);
+            printf("    UID: 0x%08X\n", pkt->handshake.uid);
             if (g_use_colors) printf("%s", ANSI_RESET);
             g_stats.handshake_packets++;
             break;
         }
         case SRXL2_PKT_CONTROL: {
-            const srxl2_control_t* ctrl = &packet->payload.control;
             if (g_use_colors) printf("%s", ANSI_BLUE);
-            printf("    Reply ID: 0x%02X\n", ctrl->reply_id);
-            printf("    RSSI: %d %s\n", ctrl->channel_data.rssi,
-                   ctrl->channel_data.rssi < 0 ? "dBm" : "%");
-            printf("    Frame Losses: %u\n", ctrl->channel_data.frame_losses);
-            printf("    Active Channels: %u\n", ctrl->channel_data.num_channels);
+            printf("    Reply ID: 0x%02X\n", pkt->control.reply_id);
+            printf("    RSSI: %d %s\n", pkt->control.channel.rssi,
+                   pkt->control.channel.rssi < 0 ? "dBm" : "%");
+            printf("    Frame Losses: %u\n", pkt->control.channel.frame_losses);
+            printf("    Active Channels: %u\n", pkt->control.channel.num_channels);
             if (g_use_colors) printf("%s", ANSI_RESET);
             g_stats.channel_packets++;
             break;
         }
         case SRXL2_PKT_TELEMETRY:
             if (g_use_colors) printf("%s", ANSI_GREEN);
-            printf("    Dest: 0x%02X\n", packet->payload.telemetry.dest_device_id);
-            printf("    Sensor ID: 0x%02X\n", packet->payload.telemetry.raw[0]);
+            printf("    Dest: 0x%02X\n", pkt->telemetry.dest_id);
+            printf("    Sensor ID: 0x%02X\n", pkt->telemetry.payload[0]);
             if (g_use_colors) printf("%s", ANSI_RESET);
             g_stats.telemetry_packets++;
             break;
@@ -429,14 +425,13 @@ static void output_details_packet(const srxl2_packet_t* packet, uint64_t timesta
         case SRXL2_PKT_RSSI:
             g_stats.rssi_packets++;
             break;
-        case SRXL2_PKT_PARAMETER:
-            g_stats.param_packets++;
-            break;
-        case SRXL2_PKT_SPM_INTERNAL:
-            g_stats.internal_packets++;
-            break;
         default:
-            g_stats.unknown_packets++;
+            if (pkt->packet_type == 0x50)
+                g_stats.param_packets++;
+            else if (pkt->packet_type == 0x99)
+                g_stats.internal_packets++;
+            else
+                g_stats.unknown_packets++;
             break;
     }
 
@@ -463,20 +458,20 @@ static void output_details_packet(const srxl2_packet_t* packet, uint64_t timesta
 
 static const char* get_device_icon(uint8_t device_id)
 {
-    srxl2_device_type_t type = srxl2_get_device_type(device_id);
+    uint8_t type = srxl2_device_type(device_id);
     switch (type) {
-        case SRXL2_DEV_FLIGHT_CONTROLLER: return "[FC]";
-        case SRXL2_DEV_ESC: return "[ESC]";
-        case SRXL2_DEV_RECEIVER: return "[RX]";
-        case SRXL2_DEV_REMOTE_RECEIVER: return "[RRX]";
-        case SRXL2_DEV_VTX: return "[VTX]";
-        case SRXL2_DEV_SENSOR: return "[SNS]";
-        case SRXL2_DEV_SERVO_1:
-        case SRXL2_DEV_SERVO_2: return "[SRV]";
-        case SRXL2_DEV_EXTERNAL_RF: return "[RF]";
-        case SRXL2_DEV_REMOTE_ID: return "[RID]";
-        case SRXL2_DEV_BROADCAST: return "[BRD]";
-        case SRXL2_DEV_NONE:
+        case 0x3: return "[FC]";
+        case 0x4: return "[ESC]";
+        case 0x2: return "[RX]";
+        case 0x1: return "[RRX]";
+        case 0x8: return "[VTX]";
+        case 0xB: return "[SNS]";
+        case 0x6:
+        case 0x7: return "[SRV]";
+        case 0x9: return "[RF]";
+        case 0xA: return "[RID]";
+        case 0xF: return "[BRD]";
+        case 0x0:
         default:
             return "[???]";
     }
@@ -515,7 +510,7 @@ static void update_state_display(void)
         mvprintw(row, 0, "%s 0x%02X", get_device_icon(dev->device_id), dev->device_id);
         attroff(A_BOLD | COLOR_PAIR(2));
 
-        mvprintw(row, 14, "%-16s", srxl2_device_type_name(srxl2_get_device_type(dev->device_id)));
+        mvprintw(row, 14, "%-16s", srxl2_device_type_name(srxl2_device_type(dev->device_id)));
 
         // RSSI with color coding
         if (dev->rssi != 0) {
@@ -628,7 +623,7 @@ static uint8_t extract_device_id_from_sender(const char* sender)
     return 0;
 }
 
-static void output_state_packet_with_sender(const srxl2_packet_t* packet, const char* sender)
+static void output_state_packet_with_sender(const srxl2_decoded_pkt_t* pkt, const char* sender)
 {
     uint64_t now = get_timestamp_us();
 
@@ -636,30 +631,29 @@ static void output_state_packet_with_sender(const srxl2_packet_t* packet, const 
     uint8_t sender_device_id = extract_device_id_from_sender(sender);
 
     // Update device state
-    if (packet->header.packet_type == SRXL2_PKT_HANDSHAKE) {
-        device_state_t* dev = find_or_create_device(packet->payload.handshake.src_device_id);
+    if (pkt->packet_type == SRXL2_PKT_HANDSHAKE) {
+        device_state_t* dev = find_or_create_device(pkt->handshake.src_id);
         if (dev) {
-            dev->uid = packet->payload.handshake.uid;
-            dev->priority = packet->payload.handshake.priority;
+            dev->uid = pkt->handshake.uid;
+            dev->priority = pkt->handshake.priority;
             dev->last_seen = now;
             dev->packet_count++;
         }
-    } else if (packet->header.packet_type == SRXL2_PKT_CONTROL) {
+    } else if (pkt->packet_type == SRXL2_PKT_CONTROL) {
         // Update from channel data - track the sender (usually master 0x10)
-        const srxl2_channel_data_t* ch = &packet->payload.control.channel_data;
 
         // Use sender_device_id if available, otherwise assume master 0x10
         uint8_t control_sender = (sender_device_id != 0) ? sender_device_id : 0x10;
         device_state_t* dev = find_or_create_device(control_sender);
         if (dev) {
-            dev->rssi = ch->rssi;
-            dev->frame_losses = ch->frame_losses;
-            dev->channel_mask = ch->channel_mask;
-            memcpy(dev->channels, ch->values, sizeof(dev->channels));
+            dev->rssi = pkt->control.channel.rssi;
+            dev->frame_losses = pkt->control.channel.frame_losses;
+            dev->channel_mask = pkt->control.channel.mask;
+            memcpy(dev->channels, pkt->control.channel.values, sizeof(dev->channels));
             dev->last_seen = now;
             dev->packet_count++;
         }
-    } else if (packet->header.packet_type == SRXL2_PKT_TELEMETRY) {
+    } else if (pkt->packet_type == SRXL2_PKT_TELEMETRY) {
         // Track telemetry sender device (battery/sensor sending telemetry)
         if (sender_device_id != 0) {
             device_state_t* sender_dev = find_or_create_device(sender_device_id);
@@ -670,11 +664,10 @@ static void output_state_packet_with_sender(const srxl2_packet_t* packet, const 
         }
 
         // Also track telemetry data for destination device
-        const srxl2_telemetry_t* telem = &packet->payload.telemetry;
-        device_state_t* dest_dev = find_or_create_device(telem->dest_device_id);
+        device_state_t* dest_dev = find_or_create_device(pkt->telemetry.dest_id);
         if (dest_dev) {
             // Telemetry data is 16 bytes, first byte is sensor ID
-            uint8_t sensor_id = telem->raw[0];
+            uint8_t sensor_id = pkt->telemetry.payload[0];
 
             // Find or create sensor
             telemetry_sensor_t* sensor = NULL;
@@ -693,7 +686,7 @@ static void output_state_packet_with_sender(const srxl2_packet_t* packet, const 
             if (sensor) {
                 // Copy all 16 bytes of telemetry data
                 sensor->data_len = 16;
-                memcpy(sensor->raw_data, telem->raw, 16);
+                memcpy(sensor->raw_data, pkt->telemetry.payload, 16);
                 sensor->last_seen = now;
             }
 
@@ -715,8 +708,8 @@ static void output_state_init(void) {
     exit(1);
 }
 static void output_state_cleanup(void) {}
-static void output_state_packet_with_sender(const srxl2_packet_t* packet, const char* sender) {
-    (void)packet;
+static void output_state_packet_with_sender(const srxl2_decoded_pkt_t* pkt, const char* sender) {
+    (void)pkt;
     (void)sender;
 }
 #endif
@@ -727,13 +720,13 @@ static void output_state_packet_with_sender(const srxl2_packet_t* packet, const 
 
 static void process_packet(const uint8_t* data, size_t length, const char* sender)
 {
-    srxl2_packet_t packet;
-    srxl2_parse_result_t result = srxl2_parse_packet(data, length, &packet);
-
-    // Filter internal packets
-    if (!g_show_internal && length >= 2 && data[1] == SRXL2_PKT_SPM_INTERNAL) {
+    // Filter internal packets by raw byte before parsing
+    if (!g_show_internal && length >= 2 && data[1] == 0x99) {
         return;
     }
+
+    srxl2_decoded_pkt_t pkt;
+    srxl2_parse_result_t result = srxl2_pkt_parse(data, (uint8_t)length, &pkt);
 
     g_packet_count++;
     uint64_t timestamp = get_timestamp_us();
@@ -742,7 +735,7 @@ static void process_packet(const uint8_t* data, size_t length, const char* sende
         g_stats.invalid_packets++;
         if (g_format == FORMAT_DETAILS) {
             if (g_use_colors) printf("%s", ANSI_RED);
-            printf("❌ [INVALID] %s\n", srxl2_parse_result_str(result));
+            printf("[INVALID] %s\n", srxl2_parse_result_name(result));
             if (g_use_colors) printf("%s", ANSI_RESET);
         }
         return;
@@ -753,16 +746,16 @@ static void process_packet(const uint8_t* data, size_t length, const char* sende
     // Output based on format
     switch (g_format) {
         case FORMAT_DETAILS:
-            output_details_packet(&packet, timestamp, sender, data, length);
+            output_details_packet(&pkt, timestamp, sender, data, length);
             break;
         case FORMAT_JSON:
-            output_json_packet(&packet, timestamp, sender, length);
+            output_json_packet(&pkt, timestamp, sender, length);
             break;
         case FORMAT_ONELINE:
-            output_oneline_packet(&packet, timestamp, sender);
+            output_oneline_packet(&pkt, timestamp, sender);
             break;
         case FORMAT_STATE:
-            output_state_packet_with_sender(&packet, sender);
+            output_state_packet_with_sender(&pkt, sender);
             break;
     }
 }
@@ -862,9 +855,7 @@ int main(int argc, char* argv[])
     if (g_format == FORMAT_STATE) {
         output_state_init();
     } else if (g_format == FORMAT_DETAILS) {
-        printf("╔═══════════════════════════════════════════════╗\n");
-        printf("║       SRXL2 Bus Sniffer - Details View       ║\n");
-        printf("╚═══════════════════════════════════════════════╝\n");
+        printf("=== SRXL2 Bus Sniffer - Details View ===\n");
         printf("\nListening on %s (%s)... Press Ctrl+C to exit\n\n",
                device, use_serial ? "serial" : "fakeuart");
     }
@@ -887,8 +878,7 @@ int main(int argc, char* argv[])
 
     // Print statistics (except for state format)
     if (g_format != FORMAT_STATE && g_format != FORMAT_JSON) {
-        printf("\n═══════════════════════════════════════════════\n");
-        printf("Statistics:\n");
+        printf("\n=== Statistics ===\n");
         printf("  Total packets: %llu\n", (unsigned long long)g_stats.total_packets);
         printf("  Handshake: %llu\n", (unsigned long long)g_stats.handshake_packets);
         printf("  Channel Data: %llu\n", (unsigned long long)g_stats.channel_packets);

@@ -29,17 +29,8 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/fakeuart
     ${CMAKE_CURRENT_SOURCE_DIR}/libtransport
     ${CMAKE_CURRENT_SOURCE_DIR}/programs
-    ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2parser
+    ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
     ${CMAKE_CURRENT_SOURCE_DIR}/SpektrumDocumentation/Telemetry
-)
-
-###############################################################################
-# SRXL2 Parser Library (standalone, zero dependencies)
-###############################################################################
-
-add_library(srxl2parser STATIC
-    libsrxl2parser/srxl2_parser.c
-    libsrxl2parser/srxl2_parser.h
 )
 
 ###############################################################################
@@ -161,18 +152,50 @@ if(CURSES_FOUND)
     target_compile_definitions(srxl2_sniffer PRIVATE HAVE_NCURSES)
     target_include_directories(srxl2_sniffer PRIVATE ${CURSES_INCLUDE_DIRS})
     target_link_libraries(srxl2_sniffer
-        srxl2parser
+        srxl2_new
         transport
         ${CURSES_LIBRARIES}
     )
     message(STATUS "Building sniffer with ncurses support (state format available)")
 else()
     target_link_libraries(srxl2_sniffer
-        srxl2parser
+        srxl2_new
         transport
     )
     message(STATUS "Building sniffer without ncurses support (state format unavailable)")
 endif()
+
+###############################################################################
+# New Simulation Programs (using libsrxl2)
+###############################################################################
+
+# SRXL2 New Master Simulator (libsrxl2)
+add_executable(srxl2_new_master_sim
+    programs/srxl2_new_master_sim.c
+)
+target_include_directories(srxl2_new_master_sim PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakeuart
+)
+target_link_libraries(srxl2_new_master_sim
+    srxl2_new
+    fakeuart
+    m
+)
+
+# SRXL2 New Battery Simulator (libsrxl2)
+add_executable(srxl2_new_battery_sim
+    programs/srxl2_new_battery_sim.c
+)
+target_include_directories(srxl2_new_battery_sim PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakeuart
+)
+target_link_libraries(srxl2_new_battery_sim
+    srxl2_new
+    fakeuart
+    m
+)
 
 ###############################################################################
 # SRXL2_Master Examples (optional)
@@ -186,6 +209,110 @@ if(BUILD_MASTER_EXAMPLES)
 endif()
 
 ###############################################################################
+# Test Suite
+###############################################################################
+
+option(BUILD_TESTS "Build test suite" ON)
+
+if(BUILD_TESTS)
+    enable_testing()
+
+    # Unit tests (link srxl2_new — no SRXL2 state machine)
+    foreach(test_name test_crc test_parser test_telemetry)
+        add_executable(${test_name} tests/${test_name}.c)
+        target_link_libraries(${test_name} srxl2_new m)
+        target_include_directories(${test_name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+        )
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
+
+    # State machine tests (compile SRXL2 lib + master lib directly)
+    foreach(test_name test_master test_slave)
+        add_executable(${test_name}
+            tests/${test_name}.c
+            tests/test_helpers.c
+            SRXL2/Source/spm_srxl.c
+            SRXL2_Master/spm_srxl_master.c
+        )
+        target_compile_definitions(${test_name} PRIVATE
+            SRXL_INCLUDE_MASTER_CODE
+            SRXL_ENABLE_INTERNAL
+        )
+        # tests/ first in include path → overrides spm_srxl_config.h with capture version
+        target_include_directories(${test_name} BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        )
+        target_include_directories(${test_name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2/Source
+            ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master
+        )
+        target_link_libraries(${test_name} m)
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
+endif()
+
+###############################################################################
+# libsrxl2 — Modern SRXL2 Stack
+###############################################################################
+
+add_library(srxl2_new STATIC
+    libsrxl2/srxl2.c
+    libsrxl2/srxl2_packet.c
+    libsrxl2/srxl2_telemetry.c
+)
+target_include_directories(srxl2_new PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+)
+# Optional: small CRC mode (bitwise instead of table lookup)
+# target_compile_definitions(srxl2_new PRIVATE SRXL2_CRC_SMALL)
+
+if(BUILD_TESTS)
+    # New lib tests
+    foreach(test_name test_srxl2_packet test_srxl2_master test_srxl2_slave test_srxl2_interop)
+        add_executable(${test_name} tests/${test_name}.c)
+        target_link_libraries(${test_name} srxl2_new m)
+        target_include_directories(${test_name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+        )
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
+
+    # Shared scenario tests — new lib runner
+    add_executable(test_scenarios_new tests/test_scenarios_new.c)
+    target_link_libraries(test_scenarios_new srxl2_new m)
+    target_include_directories(test_scenarios_new PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+    )
+    add_test(NAME test_scenarios_new COMMAND test_scenarios_new)
+
+    # Shared scenario tests — legacy lib runner
+    add_executable(test_scenarios_legacy
+        tests/test_scenarios_legacy.c
+        tests/test_helpers.c
+        SRXL2/Source/spm_srxl.c
+        SRXL2_Master/spm_srxl_master.c
+    )
+    target_compile_definitions(test_scenarios_legacy PRIVATE
+        SRXL_INCLUDE_MASTER_CODE
+        SRXL_ENABLE_INTERNAL
+    )
+    target_include_directories(test_scenarios_legacy BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+    target_include_directories(test_scenarios_legacy PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2/Source
+        ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master
+        ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+    )
+    target_link_libraries(test_scenarios_legacy srxl2_new m)
+    add_test(NAME test_scenarios_legacy COMMAND test_scenarios_legacy)
+endif()
+
+###############################################################################
 # Installation
 ###############################################################################
 
@@ -193,19 +320,23 @@ install(TARGETS
     srxl2_master_sim
     srxl2_battery_sim
     srxl2_sniffer
+    srxl2_new_master_sim
+    srxl2_new_battery_sim
     DESTINATION bin
 )
 
 install(TARGETS
-    srxl2parser
+    srxl2_new
     transport
     fakeuart
     DESTINATION lib
 )
 
 install(FILES
-    libsrxl2parser/srxl2_parser.h
-    DESTINATION include/srxl2parser
+    libsrxl2/srxl2.h
+    libsrxl2/srxl2_packet.h
+    libsrxl2/srxl2_telemetry.h
+    DESTINATION include/srxl2
 )
 
 install(FILES
@@ -231,8 +362,10 @@ message(STATUS "  C Compiler: ${CMAKE_C_COMPILER}")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")
 message(STATUS "Targets:")
-message(STATUS "  srxl2_master_sim  - SRXL2 Master Simulator")
-message(STATUS "  srxl2_battery_sim - SRXL2 Battery Device Simulator")
-message(STATUS "  srxl2_sniffer     - SRXL2 Bus Sniffer")
+message(STATUS "  srxl2_master_sim      - SRXL2 Master Simulator (legacy)")
+message(STATUS "  srxl2_battery_sim     - SRXL2 Battery Simulator (legacy)")
+message(STATUS "  srxl2_new_master_sim  - SRXL2 Master Simulator (libsrxl2)")
+message(STATUS "  srxl2_new_battery_sim - SRXL2 Battery Simulator (libsrxl2)")
+message(STATUS "  srxl2_sniffer         - SRXL2 Bus Sniffer")
 message(STATUS "═══════════════════════════════════════════════")
 message(STATUS "")

@@ -1,5 +1,6 @@
 # Build directories
 build/
+build_test/
 cmake-build-*/
 
 # Compiled files
@@ -10,9 +11,10 @@ cmake-build-*/
 *.dll
 *.exe
 
-# IDE files
+# IDE / editor files
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -21,6 +23,10 @@ cmake-build-*/
 .DS_Store
 Thumbs.db
 
-# Temporary files
+# PDFs (reference copies live in SpektrumDocumentation submodule)
+doc/*.pdf
+
+# Temporary / backup files
 *.log
 *.tmp
+*.old
