@@ -1,8 +1,9 @@
 /*
- * Telemetry Decoder Unit Tests
+ * Telemetry Decoder & Encoder Unit Tests
  *
  * Tests the standalone telemetry payload decoder for ESC (0x20),
- * Smart Battery (0x42), and edge cases.
+ * Smart Battery (0x42), and edge cases. Also tests round-trip
+ * encode/decode for all 11 supported sensor types.
  *
  * MIT License
  */
@@ -193,12 +194,300 @@ static void test_null_input(void)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Round-trip Encode/Decode Tests
+///////////////////////////////////////////////////////////////////////////////
+
+static void test_roundtrip_esc(void)
+{
+    TEST_BEGIN(test_roundtrip_esc);
+    srxl2_telem_esc_t in = {
+        .rpm = 15000.0f, .voltage = 22.5f, .current = 35.0f,
+        .temp_fet = 65.0f, .temp_bec = 40.0f,
+        .current_bec = 1.5f, .voltage_bec = 5.0f,
+        .throttle = 75.0f, .power_out = 80.0f, .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_esc(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_ESC, dec.type);
+    ASSERT_FLOAT_EQ(15000.0f, dec.esc.rpm, 10.0f);
+    ASSERT_FLOAT_EQ(22.5f, dec.esc.voltage, 0.02f);
+    ASSERT_FLOAT_EQ(35.0f, dec.esc.current, 0.02f);
+    ASSERT_FLOAT_EQ(65.0f, dec.esc.temp_fet, 0.2f);
+    ASSERT_FLOAT_EQ(40.0f, dec.esc.temp_bec, 0.2f);
+    ASSERT_FLOAT_EQ(1.5f, dec.esc.current_bec, 0.2f);
+    ASSERT_FLOAT_EQ(5.0f, dec.esc.voltage_bec, 0.06f);
+    ASSERT_FLOAT_EQ(75.0f, dec.esc.throttle, 1.0f);
+    ASSERT_FLOAT_EQ(80.0f, dec.esc.power_out, 1.0f);
+    TEST_END();
+}
+
+static void test_roundtrip_esc_nodata(void)
+{
+    TEST_BEGIN(test_roundtrip_esc_nodata);
+    srxl2_telem_esc_t in = {
+        .rpm = NAN, .voltage = NAN, .current = NAN,
+        .temp_fet = NAN, .temp_bec = NAN,
+        .current_bec = NAN, .voltage_bec = NAN,
+        .throttle = NAN, .power_out = NAN, .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_esc(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_NAN(dec.esc.rpm);
+    ASSERT_NAN(dec.esc.voltage);
+    ASSERT_NAN(dec.esc.current);
+    ASSERT_NAN(dec.esc.temp_fet);
+    ASSERT_NAN(dec.esc.temp_bec);
+    ASSERT_NAN(dec.esc.current_bec);
+    ASSERT_NAN(dec.esc.voltage_bec);
+    ASSERT_NAN(dec.esc.throttle);
+    ASSERT_NAN(dec.esc.power_out);
+    TEST_END();
+}
+
+static void test_roundtrip_fp_mah(void)
+{
+    TEST_BEGIN(test_roundtrip_fp_mah);
+    srxl2_telem_fp_mah_t in = {
+        .current_a = 12.5f, .charge_used_a = 1500.0f, .temp_a = 35.0f,
+        .current_b = 0.0f, .charge_used_b = 0.0f, .temp_b = NAN,
+        .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_fp_mah(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_FP_MAH, dec.type);
+    ASSERT_FLOAT_EQ(12.5f, dec.fp_mah.current_a, 0.2f);
+    ASSERT_FLOAT_EQ(1500.0f, dec.fp_mah.charge_used_a, 1.0f);
+    ASSERT_FLOAT_EQ(35.0f, dec.fp_mah.temp_a, 0.2f);
+    ASSERT_NAN(dec.fp_mah.temp_b);
+    TEST_END();
+}
+
+static void test_roundtrip_rpm(void)
+{
+    TEST_BEGIN(test_roundtrip_rpm);
+    srxl2_telem_rpm_t in = {
+        .rpm = 15000.0f, .voltage = 22.2f, .temperature = NAN,
+        .rssi_a = -50, .rssi_b = -60, .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_rpm(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_RPM, dec.type);
+    ASSERT_FLOAT_EQ(15000.0f, dec.rpm.rpm, 100.0f);
+    ASSERT_FLOAT_EQ(22.2f, dec.rpm.voltage, 0.02f);
+    ASSERT_NAN(dec.rpm.temperature);
+    ASSERT_EQ(-50, dec.rpm.rssi_a);
+    ASSERT_EQ(-60, dec.rpm.rssi_b);
+    TEST_END();
+}
+
+static void test_roundtrip_lipomon(void)
+{
+    TEST_BEGIN(test_roundtrip_lipomon);
+    srxl2_telem_lipomon_t in = {
+        .cell = {3.70f, 3.80f, 3.90f, 4.00f, NAN, NAN},
+        .temp = 30.0f, .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_lipomon(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_LIPOMON, dec.type);
+    ASSERT_FLOAT_EQ(3.70f, dec.lipomon.cell[0], 0.02f);
+    ASSERT_FLOAT_EQ(3.80f, dec.lipomon.cell[1], 0.02f);
+    ASSERT_FLOAT_EQ(3.90f, dec.lipomon.cell[2], 0.02f);
+    ASSERT_FLOAT_EQ(4.00f, dec.lipomon.cell[3], 0.02f);
+    ASSERT_NAN(dec.lipomon.cell[4]);
+    ASSERT_NAN(dec.lipomon.cell[5]);
+    ASSERT_FLOAT_EQ(30.0f, dec.lipomon.temp, 0.2f);
+    TEST_END();
+}
+
+static void test_roundtrip_flitectrl(void)
+{
+    TEST_BEGIN(test_roundtrip_flitectrl);
+    srxl2_telem_flitectrl_t in = { .flight_mode = 3, .s_id = 0 };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_flitectrl(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_FLITECTRL, dec.type);
+    ASSERT_EQ(3, dec.flitectrl.flight_mode);
+    TEST_END();
+}
+
+static void test_roundtrip_airspeed(void)
+{
+    TEST_BEGIN(test_roundtrip_airspeed);
+    srxl2_telem_airspeed_t in = { .speed = 120.0f, .max_speed = 150.0f, .s_id = 0 };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_airspeed(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_AIRSPEED, dec.type);
+    ASSERT_FLOAT_EQ(120.0f, dec.airspeed.speed, 1.0f);
+    ASSERT_FLOAT_EQ(150.0f, dec.airspeed.max_speed, 1.0f);
+    TEST_END();
+}
+
+static void test_roundtrip_gmeter(void)
+{
+    TEST_BEGIN(test_roundtrip_gmeter);
+    srxl2_telem_gmeter_t in = {
+        .x = 1.5f, .y = -0.5f, .z = 9.8f,
+        .max_x = 2.0f, .max_y = 1.0f, .max_z = 10.0f, .min_z = -1.0f,
+        .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_gmeter(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_GMETER, dec.type);
+    ASSERT_FLOAT_EQ(1.5f, dec.gmeter.x, 0.02f);
+    ASSERT_FLOAT_EQ(-0.5f, dec.gmeter.y, 0.02f);
+    ASSERT_FLOAT_EQ(9.8f, dec.gmeter.z, 0.02f);
+    ASSERT_FLOAT_EQ(2.0f, dec.gmeter.max_x, 0.02f);
+    ASSERT_FLOAT_EQ(-1.0f, dec.gmeter.min_z, 0.02f);
+    TEST_END();
+}
+
+static void test_roundtrip_gyro(void)
+{
+    TEST_BEGIN(test_roundtrip_gyro);
+    srxl2_telem_gyro_t in = {
+        .x = 100.5f, .y = -50.0f, .z = 25.0f,
+        .max_x = 200.0f, .max_y = 100.0f, .max_z = 50.0f,
+        .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_gyro(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_GYRO, dec.type);
+    ASSERT_FLOAT_EQ(100.5f, dec.gyro.x, 0.2f);
+    ASSERT_FLOAT_EQ(-50.0f, dec.gyro.y, 0.2f);
+    ASSERT_FLOAT_EQ(25.0f, dec.gyro.z, 0.2f);
+    ASSERT_FLOAT_EQ(200.0f, dec.gyro.max_x, 0.2f);
+    TEST_END();
+}
+
+static void test_roundtrip_attmag(void)
+{
+    TEST_BEGIN(test_roundtrip_attmag);
+    srxl2_telem_attmag_t in = {
+        .roll = 15.5f, .pitch = -10.0f, .yaw = 180.0f,
+        .mag_x = 25.0f, .mag_y = -30.0f, .mag_z = 45.0f,
+        .heading = 270.0f, .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_attmag(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_ATTMAG, dec.type);
+    ASSERT_FLOAT_EQ(15.5f, dec.attmag.roll, 0.2f);
+    ASSERT_FLOAT_EQ(-10.0f, dec.attmag.pitch, 0.2f);
+    ASSERT_FLOAT_EQ(180.0f, dec.attmag.yaw, 0.2f);
+    ASSERT_FLOAT_EQ(25.0f, dec.attmag.mag_x, 0.2f);
+    ASSERT_FLOAT_EQ(-30.0f, dec.attmag.mag_y, 0.2f);
+    ASSERT_FLOAT_EQ(270.0f, dec.attmag.heading, 0.2f);
+    TEST_END();
+}
+
+static void test_roundtrip_gps_binary(void)
+{
+    TEST_BEGIN(test_roundtrip_gps_binary);
+    srxl2_telem_gps_binary_t in = {
+        .altitude = 150.0f,
+        .latitude = 48.8566f,     /* Paris */
+        .longitude = 2.3522f,
+        .heading = 90.0f,
+        .ground_speed = 50.0f,
+        .num_sats = 12, .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_gps_binary(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_GPS_BINARY, dec.type);
+    ASSERT_FLOAT_EQ(150.0f, dec.gps_binary.altitude, 1.0f);
+    ASSERT_FLOAT_EQ(48.8566f, dec.gps_binary.latitude, 0.0001f);
+    ASSERT_FLOAT_EQ(2.3522f, dec.gps_binary.longitude, 0.0001f);
+    ASSERT_FLOAT_EQ(90.0f, dec.gps_binary.heading, 0.2f);
+    ASSERT_FLOAT_EQ(50.0f, dec.gps_binary.ground_speed, 1.0f);
+    ASSERT_EQ(12, dec.gps_binary.num_sats);
+    TEST_END();
+}
+
+static void test_roundtrip_gps_negative_coords(void)
+{
+    TEST_BEGIN(test_roundtrip_gps_negative_coords);
+    srxl2_telem_gps_binary_t in = {
+        .altitude = -50.0f,       /* Below sea level */
+        .latitude = -33.8688f,    /* Sydney */
+        .longitude = 151.2093f,
+        .heading = 0.0f,
+        .ground_speed = 0.0f,
+        .num_sats = 8, .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_gps_binary(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_FLOAT_EQ(-50.0f, dec.gps_binary.altitude, 1.0f);
+    ASSERT_FLOAT_EQ(-33.8688f, dec.gps_binary.latitude, 0.0001f);
+    ASSERT_FLOAT_EQ(151.2093f, dec.gps_binary.longitude, 0.001f);
+    TEST_END();
+}
+
+static void test_roundtrip_vario(void)
+{
+    TEST_BEGIN(test_roundtrip_vario);
+    srxl2_telem_vario_t in = {
+        .altitude = 500,
+        .delta_0250ms = 2.5f, .delta_0500ms = 2.0f, .delta_1000ms = 1.5f,
+        .delta_1500ms = 1.0f, .delta_2000ms = 0.5f, .delta_3000ms = -0.5f,
+        .s_id = 0,
+    };
+    srxl2_telem_raw_t raw;
+    srxl2_encode_vario(raw, &in);
+
+    srxl2_telem_decoded_t dec;
+    ASSERT_TRUE(srxl2_decode_telemetry(raw, &dec));
+    ASSERT_EQ(SRXL2_TELEM_TYPE_VARIO, dec.type);
+    ASSERT_EQ(500, dec.vario.altitude);
+    ASSERT_FLOAT_EQ(2.5f, dec.vario.delta_0250ms, 0.2f);
+    ASSERT_FLOAT_EQ(2.0f, dec.vario.delta_0500ms, 0.2f);
+    ASSERT_FLOAT_EQ(1.5f, dec.vario.delta_1000ms, 0.2f);
+    ASSERT_FLOAT_EQ(-0.5f, dec.vario.delta_3000ms, 0.2f);
+    TEST_END();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // Main
 ///////////////////////////////////////////////////////////////////////////////
 
 int main(void)
 {
-    printf("=== Telemetry Decoder Tests ===\n");
+    printf("=== Telemetry Decoder & Encoder Tests ===\n");
 
     // ESC
     RUN_TEST(test_esc_normal_values);
@@ -212,6 +501,21 @@ int main(void)
     // Edge cases
     RUN_TEST(test_unknown_sensor);
     RUN_TEST(test_null_input);
+
+    // Round-trip encode/decode (all 11 types: 4 existing + 7 new)
+    RUN_TEST(test_roundtrip_esc);
+    RUN_TEST(test_roundtrip_esc_nodata);
+    RUN_TEST(test_roundtrip_fp_mah);
+    RUN_TEST(test_roundtrip_rpm);
+    RUN_TEST(test_roundtrip_lipomon);
+    RUN_TEST(test_roundtrip_flitectrl);
+    RUN_TEST(test_roundtrip_airspeed);
+    RUN_TEST(test_roundtrip_gmeter);
+    RUN_TEST(test_roundtrip_gyro);
+    RUN_TEST(test_roundtrip_attmag);
+    RUN_TEST(test_roundtrip_gps_binary);
+    RUN_TEST(test_roundtrip_gps_negative_coords);
+    RUN_TEST(test_roundtrip_vario);
 
     TEST_SUMMARY();
 }

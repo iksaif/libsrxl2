@@ -37,6 +37,7 @@ static int evt_channel_count;
 static bool evt_last_failsafe;
 static int evt_timeout_count;
 static int evt_handshake_count;
+static int evt_telem_request_count;
 
 static void mock_uart_send(void *user, const uint8_t *buf, uint8_t len)
 {
@@ -86,6 +87,9 @@ static void mock_event_cb(srxl2_ctx_t *ctx, const srxl2_event_t *evt,
     case SRXL2_EVT_HANDSHAKE_COMPLETE:
         evt_handshake_count++;
         break;
+    case SRXL2_EVT_TELEM_REQUEST:
+        evt_telem_request_count++;
+        break;
     default:
         break;
     }
@@ -105,6 +109,7 @@ static void mock_reset(void)
     evt_last_failsafe = false;
     evt_timeout_count = 0;
     evt_handshake_count = 0;
+    evt_telem_request_count = 0;
 }
 
 static uint8_t ctx_buf[4096];
@@ -429,6 +434,137 @@ static void test_slave_handshake_timeout_resets(void)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// TELEM_REQUEST Event
+///////////////////////////////////////////////////////////////////////////////
+
+static void test_slave_telem_request_fires_when_polled(void)
+{
+    TEST_BEGIN(test_slave_telem_request_fires_when_polled);
+    srxl2_ctx_t *ctx = slave_running(0xB1);
+
+    /* Set some telemetry */
+    uint8_t telem[16] = {0x34, 0x00};
+    srxl2_set_telemetry(ctx, telem);
+
+    /* Inject channel data with reply_id = us */
+    uint16_t values[32] = {0};
+    values[0] = 32768;
+    uint8_t pkt[80];
+    uint8_t len = srxl2_pkt_channel(pkt, SRXL2_CMD_CHANNEL, 0xB1,
+                                     -50, 0, 0x01, values);
+    inject_packet(ctx, pkt, len);
+
+    /* TELEM_REQUEST should have fired */
+    ASSERT_TRUE(evt_telem_request_count > 0);
+    TEST_END();
+}
+
+static void telem_request_cb(srxl2_ctx_t *ctx, const srxl2_event_t *evt,
+                               void *user)
+{
+    (void)user;
+    mock_event_cb(ctx, evt, user);
+
+    if (evt->type == SRXL2_EVT_TELEM_REQUEST) {
+        /* Fill telemetry in the callback (pull model) */
+        uint8_t payload[16] = {0x7E, 0x00, 0x01, 0x02, 0x03, 0x04,
+                               0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+                               0x0B, 0x0C, 0x0D, 0x0E};
+        srxl2_set_telemetry(ctx, payload);
+    }
+}
+
+static void test_slave_telem_set_in_callback_is_sent(void)
+{
+    TEST_BEGIN(test_slave_telem_set_in_callback_is_sent);
+    srxl2_ctx_t *ctx = slave_running(0xB1);
+
+    /* Override callback to use pull model */
+    srxl2_on_event(ctx, telem_request_cb, NULL);
+    evt_telem_request_count = 0;
+
+    /* Inject channel data with reply_id = us */
+    uint16_t values[32] = {0};
+    values[0] = 32768;
+    uint8_t pkt[80];
+    uint8_t len = srxl2_pkt_channel(pkt, SRXL2_CMD_CHANNEL, 0xB1,
+                                     -50, 0, 0x01, values);
+    inject_packet(ctx, pkt, len);
+
+    /* Should have sent a telemetry reply */
+    ASSERT_TRUE(mock_pkt_count > 0);
+    uint8_t rlen;
+    const uint8_t *reply = mock_get_packet(mock_pkt_count - 1, &rlen);
+    ASSERT_EQ_U(SRXL2_PKT_TELEMETRY, reply[1]);
+
+    /* The payload in the telemetry packet should be what we set in callback.
+       Telemetry packet: 0xA6, type(0x80), len, dest_id, payload[16], crc[2]
+       payload starts at offset 4. */
+    ASSERT_EQ_U(0x7E, reply[4]); /* sensor ID we set */
+    TEST_END();
+}
+
+static void test_slave_sends_zeros_if_never_set(void)
+{
+    TEST_BEGIN(test_slave_sends_zeros_if_never_set);
+    srxl2_ctx_t *ctx = slave_running(0xB1);
+
+    /* Do NOT call srxl2_set_telemetry - payload should be all zeros */
+
+    /* Inject channel data with reply_id = us */
+    uint16_t values[32] = {0};
+    values[0] = 32768;
+    uint8_t pkt[80];
+    uint8_t len = srxl2_pkt_channel(pkt, SRXL2_CMD_CHANNEL, 0xB1,
+                                     -50, 0, 0x01, values);
+    inject_packet(ctx, pkt, len);
+
+    /* Should still send a reply (bus timing requires it) */
+    ASSERT_TRUE(mock_pkt_count > 0);
+    uint8_t rlen;
+    const uint8_t *reply = mock_get_packet(mock_pkt_count - 1, &rlen);
+    ASSERT_EQ_U(SRXL2_PKT_TELEMETRY, reply[1]);
+
+    /* Payload should be all zeros (offset 4) */
+    ASSERT_EQ_U(0x00, reply[4]);
+    ASSERT_EQ_U(0x00, reply[5]);
+    TEST_END();
+}
+
+static void test_slave_telem_latches_across_polls(void)
+{
+    TEST_BEGIN(test_slave_telem_latches_across_polls);
+    srxl2_ctx_t *ctx = slave_running(0xB1);
+
+    /* Set telemetry once */
+    uint8_t telem[16] = {0x34, 0x01, 0xAA, 0xBB};
+    srxl2_set_telemetry(ctx, telem);
+
+    /* Poll twice - payload should be the same both times */
+    for (int poll = 0; poll < 2; poll++) {
+        mock_tx_len = 0;
+        mock_pkt_count = 0;
+
+        uint16_t values[32] = {0};
+        values[0] = 32768;
+        uint8_t pkt[80];
+        uint8_t len = srxl2_pkt_channel(pkt, SRXL2_CMD_CHANNEL, 0xB1,
+                                         -50, 0, 0x01, values);
+        /* Keep connection alive */
+        mock_time += 5;
+        inject_packet(ctx, pkt, len);
+
+        ASSERT_TRUE(mock_pkt_count > 0);
+        uint8_t rlen;
+        const uint8_t *reply = mock_get_packet(mock_pkt_count - 1, &rlen);
+        ASSERT_EQ_U(SRXL2_PKT_TELEMETRY, reply[1]);
+        ASSERT_EQ_U(0x34, reply[4]);
+        ASSERT_EQ_U(0x01, reply[5]);
+    }
+    TEST_END();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // Main
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -463,6 +599,12 @@ int main(void)
 
     /* Handshake Timeout */
     RUN_TEST(test_slave_handshake_timeout_resets);
+
+    /* TELEM_REQUEST */
+    RUN_TEST(test_slave_telem_request_fires_when_polled);
+    RUN_TEST(test_slave_telem_set_in_callback_is_sent);
+    RUN_TEST(test_slave_sends_zeros_if_never_set);
+    RUN_TEST(test_slave_telem_latches_across_polls);
 
     TEST_SUMMARY();
 }

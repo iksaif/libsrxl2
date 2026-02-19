@@ -35,6 +35,13 @@ extern "C" {
 #define SRXL2_TELEM_SENSOR_FP_MAH       0x34
 #define SRXL2_TELEM_SENSOR_LIPOMON      0x3A
 #define SRXL2_TELEM_SENSOR_SMART_BAT    0x42
+#define SRXL2_TELEM_SENSOR_FLITECTRL    0x05
+#define SRXL2_TELEM_SENSOR_AIRSPEED     0x11
+#define SRXL2_TELEM_SENSOR_GMETER       0x14
+#define SRXL2_TELEM_SENSOR_GYRO         0x1A
+#define SRXL2_TELEM_SENSOR_ATTMAG       0x1B
+#define SRXL2_TELEM_SENSOR_GPS_BINARY   0x26
+#define SRXL2_TELEM_SENSOR_VARIO        0x40
 #define SRXL2_TELEM_SENSOR_RPM          0x7E
 
 //=============================================================================
@@ -156,6 +163,12 @@ typedef struct {
 } __attribute__((packed)) srxl2_wire_smart_bat_limits_t;
 
 //=============================================================================
+// Raw telemetry payload type (16 bytes)
+//=============================================================================
+
+typedef uint8_t srxl2_telem_raw_t[16];
+
+//=============================================================================
 // Decoded structs (host byte order, human-readable units, NAN = no data)
 //=============================================================================
 
@@ -196,6 +209,70 @@ typedef struct {
     int8_t   rssi_b;         // dBm or % (0 = no data)
     uint8_t  s_id;
 } srxl2_telem_rpm_t;
+
+typedef struct {
+    uint8_t  flight_mode;    // Current flight mode (low nibble)
+    uint8_t  s_id;
+} srxl2_telem_flitectrl_t;
+
+typedef struct {
+    float    speed;          // km/h
+    float    max_speed;      // km/h
+    uint8_t  s_id;
+} srxl2_telem_airspeed_t;
+
+typedef struct {
+    float    x;              // G
+    float    y;              // G
+    float    z;              // G
+    float    max_x;          // G
+    float    max_y;          // G
+    float    max_z;          // G
+    float    min_z;          // G
+    uint8_t  s_id;
+} srxl2_telem_gmeter_t;
+
+typedef struct {
+    float    x;              // deg/s
+    float    y;              // deg/s
+    float    z;              // deg/s
+    float    max_x;          // deg/s
+    float    max_y;          // deg/s
+    float    max_z;          // deg/s
+    uint8_t  s_id;
+} srxl2_telem_gyro_t;
+
+typedef struct {
+    float    roll;           // degrees (0.1 resolution)
+    float    pitch;          // degrees (0.1 resolution)
+    float    yaw;            // degrees (0.1 resolution)
+    float    mag_x;          // milligauss (0.1 resolution)
+    float    mag_y;          // milligauss (0.1 resolution)
+    float    mag_z;          // milligauss (0.1 resolution)
+    float    heading;        // degrees (0.1 resolution)
+    uint8_t  s_id;
+} srxl2_telem_attmag_t;
+
+typedef struct {
+    float    altitude;       // meters (offset by +1000m on wire)
+    float    latitude;       // degrees (positive=N, negative=S)
+    float    longitude;      // degrees (positive=E, negative=W)
+    float    heading;        // degrees
+    float    ground_speed;   // km/h
+    uint8_t  num_sats;
+    uint8_t  s_id;
+} srxl2_telem_gps_binary_t;
+
+typedef struct {
+    int16_t  altitude;       // meters (0.1m resolution on wire, stored as int16)
+    float    delta_0250ms;   // m/s over 250ms
+    float    delta_0500ms;   // m/s over 500ms
+    float    delta_1000ms;   // m/s over 1000ms
+    float    delta_1500ms;   // m/s over 1500ms
+    float    delta_2000ms;   // m/s over 2000ms
+    float    delta_3000ms;   // m/s over 3000ms
+    uint8_t  s_id;
+} srxl2_telem_vario_t;
 
 typedef struct {
     float    temp;           // Degrees C
@@ -242,6 +319,13 @@ typedef enum {
     SRXL2_TELEM_TYPE_SMART_BAT_CELLS,
     SRXL2_TELEM_TYPE_SMART_BAT_ID,
     SRXL2_TELEM_TYPE_SMART_BAT_LIMITS,
+    SRXL2_TELEM_TYPE_FLITECTRL,
+    SRXL2_TELEM_TYPE_AIRSPEED,
+    SRXL2_TELEM_TYPE_GMETER,
+    SRXL2_TELEM_TYPE_GYRO,
+    SRXL2_TELEM_TYPE_ATTMAG,
+    SRXL2_TELEM_TYPE_GPS_BINARY,
+    SRXL2_TELEM_TYPE_VARIO,
 } srxl2_telem_type_t;
 
 typedef struct {
@@ -257,6 +341,13 @@ typedef struct {
         srxl2_telem_smart_bat_cells_t    smart_bat_cells;
         srxl2_telem_smart_bat_id_t       smart_bat_id;
         srxl2_telem_smart_bat_limits_t   smart_bat_limits;
+        srxl2_telem_flitectrl_t          flitectrl;
+        srxl2_telem_airspeed_t           airspeed;
+        srxl2_telem_gmeter_t             gmeter;
+        srxl2_telem_gyro_t               gyro;
+        srxl2_telem_attmag_t             attmag;
+        srxl2_telem_gps_binary_t         gps_binary;
+        srxl2_telem_vario_t              vario;
     };
 } srxl2_telem_decoded_t;
 
@@ -289,6 +380,25 @@ const char *srxl2_telem_sensor_name(uint8_t sensor_id);
  * @return     String name
  */
 const char *srxl2_telem_type_name(srxl2_telem_type_t type);
+
+//=============================================================================
+// Telemetry Encoders
+//
+// Each encoder fills a 16-byte raw payload from a decoded struct.
+// Handles unit scaling, big-endian conversion, and NAN-to-sentinel mapping.
+//=============================================================================
+
+void srxl2_encode_esc(srxl2_telem_raw_t payload, const srxl2_telem_esc_t *data);
+void srxl2_encode_fp_mah(srxl2_telem_raw_t payload, const srxl2_telem_fp_mah_t *data);
+void srxl2_encode_rpm(srxl2_telem_raw_t payload, const srxl2_telem_rpm_t *data);
+void srxl2_encode_lipomon(srxl2_telem_raw_t payload, const srxl2_telem_lipomon_t *data);
+void srxl2_encode_flitectrl(srxl2_telem_raw_t payload, const srxl2_telem_flitectrl_t *data);
+void srxl2_encode_airspeed(srxl2_telem_raw_t payload, const srxl2_telem_airspeed_t *data);
+void srxl2_encode_gmeter(srxl2_telem_raw_t payload, const srxl2_telem_gmeter_t *data);
+void srxl2_encode_gyro(srxl2_telem_raw_t payload, const srxl2_telem_gyro_t *data);
+void srxl2_encode_attmag(srxl2_telem_raw_t payload, const srxl2_telem_attmag_t *data);
+void srxl2_encode_gps_binary(srxl2_telem_raw_t payload, const srxl2_telem_gps_binary_t *data);
+void srxl2_encode_vario(srxl2_telem_raw_t payload, const srxl2_telem_vario_t *data);
 
 #ifdef __cplusplus
 }

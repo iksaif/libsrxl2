@@ -164,6 +164,7 @@ typedef enum {
     SRXL2_EVT_FWD_PGM,             /* forward programming data */
     SRXL2_EVT_HANDSHAKE_COMPLETE,   /* handshake phase done */
     SRXL2_EVT_TIMEOUT,             /* connection lost */
+    SRXL2_EVT_TELEM_REQUEST,       /* master is polling us for telemetry (slave) */
 } srxl2_event_type_t;
 
 /* Event structure (tagged union) */

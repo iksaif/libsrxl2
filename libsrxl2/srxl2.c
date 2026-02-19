@@ -660,6 +660,11 @@ static void tick_running_slave(srxl2_ctx_t *ctx)
     if (ctx->reply_pending) {
         ctx->reply_pending = false;
 
+        /* Fire TELEM_REQUEST so app can fill telemetry just-in-time */
+        srxl2_event_t evt = {0};
+        evt.type = SRXL2_EVT_TELEM_REQUEST;
+        fire_event(ctx, &evt);
+
         /* Check pending TX flags first */
         if (!send_pending_tx(ctx, ctx->reply_to_id)) {
             slave_send_telemetry(ctx);
@@ -678,6 +683,9 @@ static void init_ctx(srxl2_ctx_t *ctx, const srxl2_config_t *config)
     ctx->is_master = (config->role == SRXL2_ROLE_MASTER);
     ctx->negotiated_baud = SRXL2_BAUD_115200;
     ctx->hs_baud_and = config->baud_supported;
+
+    /* Slave telemetry output starts invalid (zero payload) */
+    ctx->telem_out_valid = false;
 
     /* Populate default handshake scan table */
     memcpy(ctx->hs_scan_table, default_scan_ids, SRXL2_SCAN_TABLE_SIZE);

@@ -5,7 +5,14 @@
  * new context-based libsrxl2 stack. Responds to handshake, sends Flight Pack
  * MAH (0x34) telemetry when polled.
  *
- * Usage: ./srxl2_new_battery_sim [--bus <name>] [--id <0xB0-0xBF>] [--help]
+ * Supports both simulated (fakeuart) and real hardware (USB-to-serial).
+ *
+ * Usage: ./srxl2_new_battery_sim [options]
+ *   --device <name>   Device (bus name for fakeuart, /dev/tty* for serial)
+ *   --serial          Use USB-to-serial instead of fakeuart
+ *   --baud <rate>     Baud rate: 115200 or 400000 (default: 115200)
+ *   --id <0xB0-0xBF>  Device ID (default: 0xB0)
+ *   --help
  *
  * MIT License
  */
@@ -18,12 +25,15 @@
 #include <signal.h>
 #include <time.h>
 #include <math.h>
+#include <getopt.h>
 
 #include "srxl2.h"
 #include "srxl2_packet.h"
-#include "fakeuart.h"
+#include "srxl2_telemetry.h"
+#include "transport.h"
 
 static volatile bool g_running = true;
+static transport_handle_t *g_transport = NULL;
 
 /*---------------------------------------------------------------------------
  * Battery simulation state
@@ -66,33 +76,21 @@ static void update_battery(uint32_t delta_ms)
 }
 
 /*---------------------------------------------------------------------------
- * Build FP_MAH telemetry payload (big-endian wire format, 16 bytes)
+ * Build FP_MAH telemetry payload using encoder API
  *---------------------------------------------------------------------------*/
 
 static void build_fp_mah_payload(uint8_t payload[16])
 {
-    memset(payload, 0, 16);
-
-    payload[0] = 0x34;  /* TELE_DEVICE_FP_MAH */
-    payload[1] = 0x00;  /* sID */
-
-    /* current_A: 0.1A resolution, big-endian int16 */
-    int16_t current_a = (int16_t)(g_battery.current * 10.0f);
-    srxl2_wr_be16(&payload[2], (uint16_t)current_a);
-
-    /* chargeUsed_A: 1mAh, big-endian int16 */
-    int16_t charge_a = (int16_t)(g_battery.capacity_used);
-    srxl2_wr_be16(&payload[4], (uint16_t)charge_a);
-
-    /* temp_A: 0.1°C, big-endian uint16 */
-    uint16_t temp_a = (uint16_t)(g_battery.temperature * 10.0f);
-    srxl2_wr_be16(&payload[6], temp_a);
-
-    /* Battery B: not populated */
-    srxl2_wr_be16(&payload[8],  0x7FFF);  /* current_B */
-    srxl2_wr_be16(&payload[10], 0x7FFF);  /* chargeUsed_B */
-    srxl2_wr_be16(&payload[12], 0x7FFF);  /* temp_B */
-    srxl2_wr_be16(&payload[14], 0x0000);  /* spare */
+    srxl2_telem_fp_mah_t data = {
+        .current_a     = g_battery.current,
+        .charge_used_a = g_battery.capacity_used,
+        .temp_a        = g_battery.temperature,
+        .current_b     = 0.0f,
+        .charge_used_b = 0.0f,
+        .temp_b        = NAN,
+        .s_id          = 0x00,
+    };
+    srxl2_encode_fp_mah(payload, &data);
 }
 
 /*---------------------------------------------------------------------------
@@ -112,7 +110,7 @@ static void signal_handler(int sig)
 static void hal_uart_send(void *user, const uint8_t *buf, uint8_t len)
 {
     (void)user;
-    fakeuart_send(buf, len);
+    transport_send(g_transport, buf, len);
 }
 
 static void hal_uart_set_baud(void *user, uint32_t baud)
@@ -167,36 +165,80 @@ static void on_event(srxl2_ctx_t *ctx, const srxl2_event_t *evt, void *user)
  * Main
  *---------------------------------------------------------------------------*/
 
+static void print_usage(const char *prog)
+{
+    printf("Usage: %s [options]\n", prog);
+    printf("  -d, --device <name>   Device (bus name or /dev/ttyUSB0)\n");
+    printf("  -s, --serial          Use USB-to-serial instead of fakeuart\n");
+    printf("  -B, --baud <rate>     Baud rate: 115200 or 400000 (default: 115200)\n");
+    printf("  -i, --id <0xB0-0xBF>  Device ID (default: 0xB0)\n");
+    printf("  -l, --list-ports      List available serial ports and exit\n");
+    printf("  -h, --help            Show this help\n");
+}
+
 int main(int argc, char *argv[])
 {
-    const char *bus_name = "srxl2bus";
+    const char *device = "srxl2bus";
+    bool use_serial = false;
+    transport_baud_t baud = TRANSPORT_BAUD_115200;
     uint8_t device_id = 0xB0;
 
-    for (int i = 1; i < argc; i++) {
-        if ((strcmp(argv[i], "--bus") == 0 || strcmp(argv[i], "-b") == 0) &&
-            i + 1 < argc) {
-            bus_name = argv[++i];
-        } else if ((strcmp(argv[i], "--id") == 0 || strcmp(argv[i], "-i") == 0) &&
-                   i + 1 < argc) {
-            unsigned long val = strtoul(argv[++i], NULL, 0);
+    static const struct option long_opts[] = {
+        {"device",     required_argument, NULL, 'd'},
+        {"serial",     no_argument,       NULL, 's'},
+        {"baud",       required_argument, NULL, 'B'},
+        {"id",         required_argument, NULL, 'i'},
+        {"list-ports", no_argument,       NULL, 'l'},
+        {"help",       no_argument,       NULL, 'h'},
+        {NULL, 0, NULL, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "d:sB:i:lh", long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'd':
+            device = optarg;
+            break;
+        case 's':
+            use_serial = true;
+            break;
+        case 'B': {
+            int rate = atoi(optarg);
+            if (rate == 400000) baud = TRANSPORT_BAUD_400000;
+            else if (rate != 115200) {
+                fprintf(stderr, "Invalid baud rate (use 115200 or 400000)\n");
+                return 1;
+            }
+            break;
+        }
+        case 'i': {
+            unsigned long val = strtoul(optarg, NULL, 0);
             if ((val & 0xF0) != 0xB0 || val > 0xBF) {
                 fprintf(stderr, "Device ID must be in range 0xB0-0xBF\n");
                 return 1;
             }
             device_id = (uint8_t)val;
-        } else if (strcmp(argv[i], "--help") == 0 ||
-                   strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [--bus <name>] [--id <0xB0-0xBF>]\n", argv[0]);
-            printf("  --bus, -b   Bus name (default: srxl2bus)\n");
-            printf("  --id,  -i   Device ID (default: 0xB0)\n");
+            break;
+        }
+        case 'l':
+            transport_list_serial_ports();
             return 0;
-        } else {
-            bus_name = argv[i];
+        case 'h':
+            print_usage(argv[0]);
+            return 0;
+        default:
+            print_usage(argv[0]);
+            return 1;
         }
     }
+    if (optind < argc)
+        device = argv[optind];
 
-    printf("=== SRXL2 New Battery Simulator (libsrxl2) ===\n");
-    printf("  Bus: %s\n", bus_name);
+    transport_type_t type = use_serial ? TRANSPORT_TYPE_SERIAL : TRANSPORT_TYPE_FAKEUART;
+
+    printf("=== SRXL2 Battery Simulator (libsrxl2) ===\n");
+    printf("  Transport: %s\n", use_serial ? "serial" : "fakeuart");
+    printf("  Device: %s\n", device);
     printf("  Device ID: 0x%02X (Sensor, Unit %u)\n",
            device_id, device_id & 0x0F);
     printf("  Battery: 4S LiPo, %.0f mAh\n\n", g_battery.capacity_total);
@@ -204,8 +246,9 @@ int main(int argc, char *argv[])
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    if (!fakeuart_init(bus_name, "NewBattery")) {
-        fprintf(stderr, "Failed to init fakeuart\n");
+    g_transport = transport_init(type, device, "NewBattery", baud);
+    if (!g_transport) {
+        fprintf(stderr, "Failed to init transport\n");
         return 1;
     }
 
@@ -229,7 +272,7 @@ int main(int argc, char *argv[])
     srxl2_ctx_t *ctx = srxl2_init(&cfg);
     if (!ctx) {
         fprintf(stderr, "Failed to init srxl2 context\n");
-        fakeuart_close();
+        transport_close(g_transport);
         return 1;
     }
     srxl2_on_event(ctx, on_event, NULL);
@@ -242,7 +285,7 @@ int main(int argc, char *argv[])
     while (g_running) {
         /* Receive from bus (1ms timeout) */
         uint8_t buf[128];
-        int n = fakeuart_receive(buf, sizeof(buf), 1, NULL, 0);
+        int n = transport_receive(g_transport, buf, sizeof(buf), 1, NULL, 0);
         if (n > 0)
             srxl2_feed(ctx, buf, (size_t)n);
 
@@ -277,12 +320,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Stats */
-    fakeuart_stats_t stats;
-    fakeuart_get_stats(&stats);
     printf("\n[Battery] Shutting down.\n");
-    printf("  TX: %llu pkts, %llu bytes\n", stats.tx_packets, stats.tx_bytes);
-    printf("  RX: %llu pkts, %llu bytes\n", stats.rx_packets, stats.rx_bytes);
     printf("  Channel data received: %u\n", g_chan_recv);
     printf("  Telemetry updates: %u\n", g_telem_sent);
     printf("  Final: %.2fV, %.2fA, %.0f/%.0fmAh, %.1f°C\n",
@@ -291,6 +329,6 @@ int main(int argc, char *argv[])
            g_battery.temperature);
 
     srxl2_destroy(ctx);
-    fakeuart_close();
+    transport_close(g_transport);
     return 0;
 }
