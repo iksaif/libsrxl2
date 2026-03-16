@@ -1,282 +1,174 @@
-# SRXL2_Master
+# SRXL2 Master
 
-Open-source implementation of SRXL2 bus master functionality for the Spektrum SRXL2 protocol.
+Open-source bus master implementation for the Spektrum SRXL2 protocol.
 
-## Overview
+## What is this?
 
-This library provides an implementation of `srxlRunMaster()` and related master-specific functions that work with the official Spektrum SRXL2 library. The official library includes placeholder hooks for master functionality but does not include the implementation (see SRXL2/Source/spm_srxl.h:575-579).
+The official [Spektrum SRXL2 library](https://github.com/SpektrumFPV/SpektrumDocumentation) (`spm_srxl.c`) provides the full SRXL2 state machine for **slave** devices but only has a placeholder for the **master** side:
 
-The SRXL2 bus master is responsible for:
-- **Device Discovery**: Performing handshake with all devices on the bus
-- **Channel Data Distribution**: Broadcasting RC channel data to slave devices
-- **Telemetry Collection**: Priority-based polling of devices for telemetry data
-- **Baud Rate Negotiation**: Managing bus speed negotiation
-- **Bus Timing**: Maintaining 11ms frame timing for Spektrum protocol
-
-## Architecture
-
-### Core Files
-
-- **spm_srxl_master.h** - Public API and master state machine definition
-- **spm_srxl_master.c** - Implementation of `srxlRunMaster()` and related functions
-- **spm_srxl_master_config.h** - Hook definitions for user customization
-
-### Hook System
-
-The library provides numerous hooks that allow users to customize master behavior without modifying the core implementation. All hooks are optional and have default no-op implementations.
-
-#### Lifecycle Hooks
-
-- `srxlOnMasterRunStart()` - Called at start of each master cycle
-- `srxlOnMasterRunEnd()` - Called at end of each master cycle
-
-#### Handshake Hooks
-
-- `srxlOnMasterHandshakeStart()` - Device discovery starting
-- `srxlOnMasterHandshakeComplete()` - Device discovery complete
-
-#### Frame Timing Hooks
-
-- `srxlOnMasterFrame()` - Called once per 11ms frame, can override default behavior
-
-#### Channel Data Hooks
-
-- `srxlOnMasterChannelDataSent()` - Channel data packet transmitted
-
-#### Telemetry Hooks
-
-- `srxlOnMasterSelectTelemDevice()` - Override default telemetry device selection
-- `srxlOnMasterSetTelemTx()` - Control RF telemetry transmission
-- `srxlOnMasterTelemSent()` - Telemetry transmitted over RF
-- `srxlOnMasterSuppressTelem()` - Suppress internal telemetry generation
-
-#### Bind Hooks
-
-- `srxlOnMasterBind()` - Handle bind requests
-
-## Examples
-
-The library includes four comprehensive examples demonstrating different use cases:
-
-### Example 1: Simple Logger (`example1_simple_logger.c`)
-
-Demonstrates basic lifecycle hooks for logging all master events.
-
-**Key Features:**
-- High-resolution timing measurements
-- Frame timing analysis
-- Complete event logging
-
-**Use Cases:**
-- Development and debugging
-- Understanding master state machine flow
-- Performance profiling
-
-**Hook Usage:**
 ```c
-void srxlOnMasterRunStart(uint8_t busIndex)
-{
-    g_startTime = getMicros();
-    printf("[Bus %d] Master cycle start\n", busIndex);
-}
-
-void srxlOnMasterHandshakeComplete(uint8_t busIndex, uint8_t deviceCount)
-{
-    printf("[Bus %d] Found %d devices\n", busIndex, deviceCount);
-}
+// spm_srxl.h:575-579
+#ifdef SRXL_INCLUDE_MASTER_CODE
+// NOTE: Most user applications should not be an SRXL2 bus master, so master-specific
+// code is not open. If your application requires this functionality, please inquire
+// about this from Spektrum RC.
+#include "spm_srxl_master.h"
+#endif
 ```
 
-### Example 2: Telemetry Monitor (`example2_telemetry_monitor.c`)
+This library fills that gap. It implements `srxlRunMaster()` and the related functions that the official library expects, so you can build an SRXL2 bus master (e.g. for a flight controller, ground station, or test tool).
 
-Tracks telemetry requests and provides detailed statistics.
+## What the bus master does
 
-**Key Features:**
-- Per-device telemetry statistics
-- Request/response rate tracking
-- Periodic statistics reporting
-- Telemetry balance analysis
+On an SRXL2 bus, the master is the device that orchestrates all communication:
 
-**Use Cases:**
-- Monitoring telemetry distribution across devices
-- Validating priority-based scheduling
-- Debugging telemetry issues
+1. **Device discovery** -- handshakes with every device on the bus
+2. **Channel data** -- broadcasts RC channel values every 11ms (5.5ms at 400k baud)
+3. **Telemetry polling** -- asks one slave per frame to send telemetry back
+4. **Baud rate negotiation** -- switches from 115200 to 400000 if all devices support it
+5. **Bind management** -- can initiate and complete receiver binding
 
-**Statistics Displayed:**
-- Total frames and requests
-- Per-device request counts
-- Request rate percentages
-- Last frame requested for each device
+## Files
 
-### Example 3: Custom Scheduler (`example3_custom_scheduler.c`)
+| File | Description |
+|------|-------------|
+| `spm_srxl_master.c` | Implementation of `srxlRunMaster()` and related functions |
+| `spm_srxl_master.h` | Public API |
+| `examples/spm_srxl_master_config.h` | Example hook declarations (copy and adapt) |
 
-Implements three different telemetry scheduling strategies.
+## Integration
 
-**Scheduling Strategies:**
+### 1. Add sources to your build
 
-1. **Round-Robin**: Simple sequential polling
-2. **Fixed Priority**: Device-type based priority
-3. **Adaptive**: Increases priority for non-responsive devices
+You need three source files:
 
-**Key Features:**
-- Strategy selection at runtime
-- Dynamic priority adjustment
-- Device-type based prioritization
+- `SRXL2/Source/spm_srxl.c` (official library)
+- `SRXL2_Master/spm_srxl_master.c` (this library)
+- Your application code
 
-**Use Cases:**
-- Custom telemetry requirements
-- Prioritizing critical sensors
-- Implementing application-specific scheduling
+Define `SRXL_INCLUDE_MASTER_CODE` so the official library pulls in the master header.
 
-**Hook Usage:**
+### 2. Provide `spm_srxl_config.h`
+
+The official library requires a config header on the include path. It must define:
+
 ```c
-uint8_t srxlOnMasterSelectTelemDevice(uint8_t busIndex, uint8_t defaultDeviceID)
-{
-    // Override default selection with custom algorithm
-    switch (g_strategy)
-    {
-        case SCHED_ROUND_ROBIN:
-            return scheduleRoundRobin(busIndex);
-        case SCHED_FIXED_PRIORITY:
-            return scheduleFixedPriority(busIndex);
-        case SCHED_ADAPTIVE:
-            return scheduleAdaptive(busIndex);
-    }
+#define SRXL_NUM_OF_BUSES           1
+#define SRXL_DEVICE_ID              0x10    // Remote Receiver (typical master ID)
+#define SRXL_DEVICE_PRIORITY        20
+#define SRXL_DEVICE_INFO            SRXL_DEVINFO_TELEM_TX_ENABLED
+#define SRXL_SUPPORTED_BAUD_RATES   SRXL_BAUD_400000  // or 0 for 115200 only
+#define SRXL_CRC_OPTIMIZE_MODE      SRXL_CRC_OPTIMIZE_SPEED
+
+// Required callbacks -- wire these to your UART driver:
+static inline void srxlSendOnUart(uint8_t uart, uint8_t *pBuffer, uint8_t length) { ... }
+static inline void srxlChangeBaudRate(uint8_t uart, uint32_t baudRate) { ... }
+
+// Telemetry / channel data callbacks:
+static inline void srxlFillTelemetry(SrxlTelemetryData *pTelemetryData) { ... }
+static inline void srxlReceivedChannelData(SrxlChannelData *pChannelData, bool isFailsafe) { ... }
+
+// Threading (no-op if single-threaded):
+static inline void srxlEnterCriticalSection(void) { }
+static inline void srxlExitCriticalSection(void) { }
+```
+
+### 3. Provide `spm_srxl_master_config.h`
+
+This header declares the 13 master hooks. Copy `examples/spm_srxl_master_config.h` and implement the hooks you care about. All hooks must be defined (they are `extern`), but most can be stubs:
+
+```c
+// Minimal set -- just print when handshake completes:
+
+void srxlOnMasterRunStart(uint8_t busIndex) { (void)busIndex; }
+void srxlOnMasterRunEnd(uint8_t busIndex) { (void)busIndex; }
+void srxlOnMasterHandshakeStart(uint8_t busIndex) { (void)busIndex; }
+void srxlOnMasterHandshakeComplete(uint8_t busIndex, uint8_t deviceCount) {
+    printf("Bus %d: found %d devices\n", busIndex, deviceCount);
 }
-```
-
-### Example 4: Device Manager (`example4_device_manager.c`)
-
-Comprehensive device discovery and management with rich status display.
-
-**Key Features:**
-- Device inventory tracking
-- Device type identification
-- Capability detection
-- Configuration validation
-- Periodic status reports
-
-**Use Cases:**
-- System validation and diagnostics
-- Device inventory management
-- Health monitoring
-- User interface for device status
-
-**Validates:**
-- Required receiver presence
-- Telemetry-capable device availability
-- Expected device configuration
-
-## Integration Guide
-
-### 1. Include the Library
-
-Add to your project:
-```c
-#include "SRXL2/Source/spm_srxl.h"
-#define SRXL_INCLUDE_MASTER_CODE
-#include "SRXL2_Master/spm_srxl_master.h"
-```
-
-### 2. Implement Hooks
-
-Create your own `spm_srxl_master_config.h` or use the provided one and implement the hooks you need:
-
-```c
-#include "SRXL2_Master/spm_srxl_master_config.h"
-
-// Implement only the hooks you need
-void srxlOnMasterHandshakeComplete(uint8_t busIndex, uint8_t deviceCount)
-{
-    printf("Found %d devices on bus %d\n", deviceCount, busIndex);
-    // Your custom logic here
+bool srxlOnMasterFrame(uint8_t busIndex, uint16_t frameCount) {
+    (void)busIndex; (void)frameCount; return false;
 }
-
-uint8_t srxlOnMasterSelectTelemDevice(uint8_t busIndex, uint8_t defaultDeviceID)
-{
-    // Custom telemetry scheduling logic
-    return myCustomScheduler(busIndex, defaultDeviceID);
+void srxlOnMasterChannelDataSent(uint8_t busIndex, uint8_t telemDeviceID) {
+    (void)busIndex; (void)telemDeviceID;
 }
+uint8_t srxlOnMasterSelectTelemDevice(uint8_t busIndex, uint8_t defaultDeviceID) {
+    (void)busIndex; return defaultDeviceID;
+}
+void srxlOnMasterSetTelemTx(bool enabled) { (void)enabled; }
+void srxlOnMasterTelemSent(void) { }
+void srxlOnMasterSuppressTelem(void *pTelemetryData) { (void)pTelemetryData; }
+bool srxlOnMasterBind(void *pBindInfo) { (void)pBindInfo; return false; }
+bool srxlOnMasterParseInternal(void *pInternal) { (void)pInternal; return false; }
+uint8_t srxlOnMasterFillInternal(void *pInternal) { (void)pInternal; return 0; }
 ```
 
-### 3. Initialize SRXL2
+### 4. Initialize and run
 
 ```c
-// Initialize as bus master (device ID 0x10 = remote receiver)
-srxlInitDevice(0x10, 20, SRXL_DEVINFO_TELEM_TX_ENABLED, uniqueID);
-srxlInitBus(0, uartHandle, SRXL_BAUD_115200);
-```
+#include "spm_srxl.h"  // pulls in spm_srxl_master.h via SRXL_INCLUDE_MASTER_CODE
 
-### 4. Main Loop
+// Init device as remote receiver (typical master)
+srxlInitDevice(0x10, 20, SRXL_DEVINFO_TELEM_TX_ENABLED, my_unique_id);
+srxlInitBus(0, uart_index, SRXL_BAUD_400000);
 
-```c
-while (running)
-{
-    // Receive UART bytes and parse
-    if (bytesReceived)
-    {
-        if (srxlParsePacket(0, rxBuffer, packetLength))
-        {
-            // Packet received and parsed
-            // srxlRunMaster() will be called automatically
+// Main loop
+while (running) {
+    int n = uart_read(buf, sizeof(buf), timeout_ms);
+    if (n > 0) {
+        // Feed bytes, parse complete packets
+        for (int i = 0; i < n; i++) {
+            rx_buf[rx_pos++] = buf[i];
+            if (rx_pos >= 3 && rx_pos >= rx_buf[2]) {
+                srxlParsePacket(0, rx_buf, rx_pos);
+                rx_pos = 0;
+            }
         }
+    } else {
+        // No data -- advance state machine on timeout
+        srxlRun(0, timeout_ms);
     }
-    else
-    {
-        // Timeout - advance state machine
-        srxlRun(0, timeoutMs);
-    }
+
+    // Set channel data for the master to broadcast
+    srxlChData.mask = 0x0000001F;  // channels 0-4
+    srxlChData.values[0] = 32768;  // center
+    // ...
 }
 ```
 
-## Master State Machine
+## Hooks reference
 
-The master operates in several states:
+| Hook | When called | Typical use |
+|------|-------------|-------------|
+| `srxlOnMasterRunStart` | Start of each `srxlRunMaster()` call | Timing, debug |
+| `srxlOnMasterRunEnd` | End of each `srxlRunMaster()` call | Timing, debug |
+| `srxlOnMasterHandshakeStart` | Handshake sequence begins | Logging |
+| `srxlOnMasterHandshakeComplete` | All devices discovered | Enable channel output |
+| `srxlOnMasterFrame` | Each frame in Running state | Return `true` to skip default channel send |
+| `srxlOnMasterChannelDataSent` | After channel packet TX | Logging, stats |
+| `srxlOnMasterSelectTelemDevice` | Choosing which slave to poll | Custom scheduling |
+| `srxlOnMasterSetTelemTx` | RF telemetry enable/disable | Control RF output |
+| `srxlOnMasterTelemSent` | Telemetry sent over RF | Aging, stats |
+| `srxlOnMasterSuppressTelem` | External telemetry received | Dedup |
+| `srxlOnMasterBind` | Bind requested | Bind logic |
+| `srxlOnMasterParseInternal` | Internal test packet received | Testing |
+| `srxlOnMasterFillInternal` | Internal test packet requested | Testing |
 
-### 1. Handshake State
+## Telemetry scheduling
 
-- Polls default device IDs for each device type (0x10, 0x21, 0x30, 0x40, etc.)
-- Collects responses and builds device list
-- Negotiates baud rate (115200 or 400000)
-- Sends broadcast handshake (0xFF) to finalize
+The default scheduler uses priority-weighted aging:
 
-### 2. Running State
+- Each discovered device has a **priority** (from its handshake) and an **age** counter
+- Every frame, all ages increment by 1
+- The polled device's age resets to 0
+- **Score = priority x (age + 1)** -- highest score wins
 
-- Sends channel data every 11ms
-- Includes telemetry request to selected device
-- Uses priority-based weighted round-robin scheduling
-- Ages telemetry counters to ensure fair polling
+This ensures higher-priority devices are polled more often while preventing starvation. Override it by returning a different device ID from `srxlOnMasterSelectTelemDevice()`.
 
-### 3. Special States
+## Device types
 
-- **SendEnterBind**: Initiate bind mode on receiver
-- **SendSetBindInfo**: Set bind information
-- **RequestBindInfo**: Query bind status
-- **SendBoundDataReport**: Report bind completion
-
-## Telemetry Scheduling Algorithm
-
-The default telemetry scheduler uses a priority-based weighted round-robin algorithm:
-
-1. Each device has a **priority** (1-100) and an **age** counter
-2. Age increments when device is not polled
-3. Age resets to 0 when device is polled
-4. **Score** = Priority × (Age + 1)
-5. Device with highest score is selected
-
-This ensures:
-- Higher priority devices are polled more frequently
-- All devices eventually get polled
-- No device starvation
-
-You can override this by implementing `srxlOnMasterSelectTelemDevice()`.
-
-## Device Types
-
-The SRXL2 protocol defines several device types:
-
-| Type | ID Range | Description |
-|------|----------|-------------|
-| 0x0 | 0x00 | None |
+| Upper nibble | ID range | Type |
+|:---:|:---:|---|
 | 0x1 | 0x10-0x1F | Remote Receiver |
 | 0x2 | 0x20-0x2F | Receiver |
 | 0x3 | 0x30-0x3F | Flight Controller |
@@ -284,93 +176,26 @@ The SRXL2 protocol defines several device types:
 | 0x6 | 0x60-0x6F | SRXL Servo (Type 1) |
 | 0x7 | 0x70-0x7F | SRXL Servo (Type 2) |
 | 0x8 | 0x80-0x8F | VTX |
-| 0x9 | 0x90-0x9F | External RF |
-| 0xA | 0xA0-0xAF | Remote ID |
 | 0xB | 0xB0-0xBF | Sensor |
 | 0xF | 0xFF | Broadcast |
 
-## Timing Considerations
-
-The SRXL2 protocol operates on an 11ms frame interval:
-
-- **Channel Data**: Sent every 11ms by master
-- **Telemetry Response**: Slave has <1ms to respond
-- **Idle Time**: 1-character (87µs @ 115200) between packets
-- **Timeout**: 50ms timeout triggers re-handshake
-
-## Building
-
-### With CMake
+## Building (as part of this repo)
 
 ```bash
-cd SRXL2_Master
-mkdir build && cd build
-cmake ..
-make
+cmake -B build -DBUILD_TESTS=ON
+cmake --build build
+# Run the master simulator with fakeuart:
+./build/srxl2_master_sim
 ```
 
-### Manual Compilation
+## Known limitations
 
-```bash
-gcc -o example1 \
-    examples/example1_simple_logger.c \
-    spm_srxl_master.c \
-    ../SRXL2/Source/spm_srxl.c \
-    -I. -I../SRXL2/Source \
-    -DSRXL_INCLUDE_MASTER_CODE
-```
-
-## Testing
-
-The examples are self-contained and can be tested with:
-
-1. **UART Simulation**: Use the included `libuartsim` for testing
-2. **Hardware Testing**: Connect to real SRXL2 devices
-3. **Unit Tests**: Test individual hook implementations
-
-## Troubleshooting
-
-### Master Not Detected
-
-- Ensure device ID is 0x10 (remote receiver)
-- Check that `master` flag is set in bus structure
-- Verify UART is properly configured
-
-### No Devices Discovered
-
-- Check UART connections and signal levels
-- Verify baud rate (start with 115200)
-- Ensure devices are powered
-- Check for bus conflicts (only one master allowed)
-
-### Telemetry Not Received
-
-- Verify devices support telemetry
-- Check device info bits (SRXL_DEVINFO_TELEM_TX_ENABLED)
-- Monitor telemetry requests in logs
-- Verify timing (devices have <1ms to respond)
+- Handshake scans all IDs 0x10-0xFE instead of only the default IDs per device type
+- No baud rate switch on the master side after negotiation
+- No failsafe timeout escalation (e.g. re-handshake after prolonged loss)
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT -- see [LICENSE](../LICENSE).
 
-## References
-
-- [Official SRXL2 Library](https://github.com/SpektrumFPV/SpektrumDocumentation)
-- [Bi-Directional SRXL Specification](../SpektrumDocumentation/Telemetry/Bi-Directional%20SRXL.pdf)
-- [Spektrum Telemetry Documentation](https://github.com/SpektrumFPV/SpektrumDocumentation)
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Test thoroughly with real hardware
-2. Follow the existing code style
-3. Document all hooks and functions
-4. Include example usage
-5. Update README.md
-
-## Acknowledgments
-
-Based on the official Spektrum SRXL2 library by Horizon Hobby, LLC.
-Protocol specification by Horizon Hobby, LLC.
+The official Spektrum SRXL2 library (`SRXL2/Source/`) is separately licensed by Horizon Hobby, LLC under MIT.

@@ -3,13 +3,14 @@
 SRXL2 sniffer and bus master for embedded targets. These compile `libsrxl2`
 directly -- no OS, no dependencies beyond the vendor SDK.
 
-Each target provides three programs:
+Each target provides four programs:
 
 | Program | Role | Description |
 |---------|------|-------------|
 | **sniffer** | Passive | Decodes all bus traffic (RX only) |
 | **master** | Bus master | Runs handshake, sends channels, prints telemetry (TX+RX) |
 | **fc** | FC slave | Connects to a receiver, receives channels, sends FC telemetry (TX+RX) |
+| **battery** | Battery sensor | Simulates a 4S LiPo, sends FP_MAH telemetry when polled (TX+RX) |
 
 ## Raspberry Pi Pico
 
@@ -28,7 +29,7 @@ cmake ..
 make -j
 ```
 
-Produces `sniffer_pico.uf2`, `master_pico.uf2`, and `fc_pico.uf2` for drag-drop flashing.
+Produces `sniffer_pico.uf2`, `master_pico.uf2`, `fc_pico.uf2`, and `battery_pico.uf2` for drag-drop flashing.
 
 ### Flash
 
@@ -40,14 +41,19 @@ cp build/sniffer_pico.uf2 /Volumes/RPI-RP2/   # macOS
 cp build/master_pico.uf2 /Volumes/RPI-RP2/
 # or
 cp build/fc_pico.uf2 /Volumes/RPI-RP2/
+# or
+cp build/battery_pico.uf2 /Volumes/RPI-RP2/
 ```
 
-### Wiring (Sniffer -- RX only)
+### Wiring (all Pico targets -- single wire)
+
+All Pico targets use PIO half-duplex UART on a single GPIO pin. The same
+wiring works for the sniffer, master, FC, and battery:
 
 ```mermaid
 graph LR
     subgraph Pico
-        RX["GPIO 1 / UART0 RX (pin 2)"]
+        GPIO0["GPIO 0 (pin 1)"]
         GND_P["GND (pin 3)"]
         USB["USB"]
     end
@@ -58,49 +64,25 @@ graph LR
     subgraph Host
         PC["Computer"]
     end
-    DATA --> RX
+    GPIO0 --- DATA
     GND_B --- GND_P
     USB --- PC
 ```
 
-### Wiring (Master -- TX+RX, half-duplex)
-
-```mermaid
-graph LR
-    subgraph Pico
-        TX["GPIO 0 / UART0 TX (pin 1)"]
-        RX["GPIO 1 / UART0 RX (pin 2)"]
-        GND_P["GND (pin 3)"]
-        USB["USB"]
-    end
-    subgraph SRXL2 Bus
-        DATA["Data (signal line)"]
-        GND_B["GND"]
-    end
-    subgraph Host
-        PC["Computer"]
-    end
-    TX --> DATA
-    DATA --> RX
-    GND_B --- GND_P
-    USB --- PC
-```
-
-> Half-duplex: both TX and RX connect to the same bus wire. Use an open-drain
-> driver or diode-OR if the bus has multiple transmitters. The master filters
-> its own echo using a timing guard after each transmit.
+> The PIO UART disables the RX state machine during TX, so there is no echo
+> and no guard timer needed. No external open-drain driver is required for
+> single-master configurations.
 
 ### Output (Master)
 
 ```
 === SRXL2 Pico Master ===
-UART0 (GPIO 0/1) @ 115200, half-duplex
+PIO UART on GPIO 0 @ 115200 baud, single-wire half-duplex
 Running...
 
 [M] Handshake done, 1 peer(s)
 [T 0xB0] FP: 2.1A 150mAh
 [M] state=RUNNING peers=1
-[T 0xB0] FP: 2.2A 151mAh
 ```
 
 ### Output (FC)
@@ -108,7 +90,7 @@ Running...
 ```
 === SRXL2 Pico FC (Slave) ===
 Device ID: 0x30 (Flight Controller)
-UART0 (GPIO 0/1) @ 115200, half-duplex
+PIO UART on GPIO 0 @ 115200 baud, single-wire half-duplex
 Telemetry: FP_MAH (0x34), RPM (0x7E)
 
 Waiting for receiver handshake...
@@ -118,8 +100,20 @@ Waiting for receiver handshake...
 [FC] state=RUNNING peers=1  22.2V 12.5A 35mAh 15000RPM
 ```
 
-> The FC wiring is the same as the Master (TX+RX half-duplex). Connect the FC
-> to a Spektrum SRXL2 receiver's data line. The receiver acts as bus master.
+### Output (Battery)
+
+```
+=== SRXL2 Pico Battery Sensor ===
+Device ID: 0xB0 (Sensor)
+PIO UART on GPIO 0 @ 115200 baud, single-wire half-duplex
+Battery: 4S LiPo, 5000 mAh
+Telemetry: FP_MAH (0x34)
+
+Waiting for master handshake...
+
+[BAT] Handshake done, 1 peer(s)
+[BAT] state=RUNNING peers=1  16.80V 5.00A 0/5000mAh (100.0%) 25.0C
+```
 
 ## Arduino Nano 33 BLE (Rev2)
 
@@ -229,8 +223,10 @@ Telemetry: FP_MAH (0x34), RPM (0x7E)
 
 | Target | Program | Flash | RAM |
 |--------|---------|-------|-----|
-| Pico (RP2040) | sniffer | ~75KB | ~8KB |
-| Pico (RP2040) | master | ~85KB | ~10KB |
+| Pico (RP2040) | sniffer | ~80KB | ~8KB |
+| Pico (RP2040) | master | ~90KB | ~10KB |
+| Pico (RP2040) | fc | ~85KB | ~10KB |
+| Pico (RP2040) | battery | ~85KB | ~10KB |
 | Nano 33 BLE (nRF52840) | sniffer | ~90KB (9%) | ~45KB (17%) |
 | Nano 33 BLE (nRF52840) | master | ~92KB (9%) | ~46KB (17%) |
 
@@ -240,4 +236,5 @@ Telemetry: FP_MAH (0x34), RPM (0x7E)
 - Master sends 16 channels at center (32768) -- intended for telemetry testing,
   not for actual RC control
 - Fixed at 115200 baud (no baud negotiation to 400000)
-- Echo suppression uses a timing guard (~2ms) which may need tuning on real hardware
+- Arduino targets use hardware UART with echo guard; Pico targets use
+  PIO half-duplex (no echo issue)

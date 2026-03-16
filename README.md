@@ -12,7 +12,7 @@
 
 # SRXL2 Experiments
 
-Open-source SRXL2 bus master and protocol stack for controlling Spektrum Smart ESCs and reading Smart Battery telemetry, targeting FC firmware and custom hardware. Includes a real-time sniffer for decoding SRXL2 traffic on the bench.
+Open-source SRXL2 protocol library for third-party integrations (flight controllers, sensors, ESCs). Includes a bus master implementation, telemetry decoders/encoders, embedded targets (Pico, Arduino), and a real-time sniffer for decoding SRXL2 traffic on the bench.
 
 **This is a community project** -- not affiliated with Spektrum or Horizon Hobby. Contributions, bug reports, and hardware testing are all welcome. If you have a Spektrum Smart ESC, receiver, or battery, your feedback is invaluable.
 
@@ -32,7 +32,7 @@ Open-source SRXL2 bus master and protocol stack for controlling Spektrum Smart E
 ├── fakeuart/           UDP multicast virtual UART (simulates half-duplex bus)
 ├── libtransport/       Abstraction over fakeuart and serial ports
 ├── programs/           Simulation programs
-├── embedded/           Embedded sniffers (Pico, Arduino)
+├── embedded/           Embedded targets (Pico, Arduino)
 ├── tests/              Test suite (11 tests)
 └── SpektrumDocumentation/  Spektrum telemetry definitions (submodule)
 ```
@@ -189,14 +189,16 @@ included in BP5 firmware releases after that PR was merged.
 
 ## Embedded Programs
 
-SRXL2 sniffer, bus master, and flight controller for Raspberry Pi Pico and
-Arduino Nano 33 BLE. These compile `libsrxl2` directly for embedded targets --
-no OS, no dependencies beyond the vendor SDK.
+SRXL2 sniffer, bus master, flight controller, and battery sensor for Raspberry
+Pi Pico and Arduino Nano 33 BLE. These compile `libsrxl2` directly for embedded
+targets -- no OS, no dependencies beyond the vendor SDK. All Pico targets use
+PIO half-duplex UART on a single GPIO pin (no echo guard needed).
 
 The **FC example** (`fc_pico`, `fc_arduino`) registers as a Flight Controller
 (device ID 0x30) slave, receives channel data from a Spektrum receiver, and
-sends back FP_MAH + RPM telemetry. This is a reference for integrating SRXL2
-into real FC firmware (iNav, ArduPilot).
+sends back FP_MAH + RPM telemetry. The **battery example** (`battery_pico`)
+simulates a 4S LiPo sensor (device ID 0xB0) with voltage sag, current drain,
+and temperature rise.
 
 See [embedded/README.md](embedded/README.md) for build instructions and wiring.
 
