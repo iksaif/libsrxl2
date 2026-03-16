@@ -1,19 +1,20 @@
 /*
- * SRXL2 Bus Master for Raspberry Pi Pico
+ * SRXL2 Bus Master for Raspberry Pi Pico (PIO UART)
  *
  * Runs the full libsrxl2 state machine as bus master: performs handshake,
  * sends channel data every 11ms, polls slaves for telemetry, and prints
  * decoded telemetry over USB CDC.
  *
- * Half-duplex: UART0 TX (GPIO 0) and RX (GPIO 1) are both wired to the
- * SRXL2 bus data line. The master filters its own echo by discarding
- * bytes received during/just after a transmit.
+ * Uses PIO for true single-pin half-duplex UART:
+ *   - SM0 = RX (runs when listening)
+ *   - SM1 = TX (enabled only during transmit)
+ *   - RX is disabled during TX, so no echo and no guard timer needed.
  *
  * Wiring:
- *   GPIO 0 (UART0 TX) -> SRXL2 bus data line (via open-drain / bus driver)
- *   GPIO 1 (UART0 RX) -> SRXL2 bus data line
- *   GND               -> SRXL2 bus ground
- *   USB               -> Host computer (telemetry output)
+ *   GPIO 0              -> SRXL2 bus data line (single wire)
+ *   GND                 -> SRXL2 bus ground
+ *   USB                 -> Host computer (telemetry output)
+ *   External 5V         -> Slave VCC
  *
  * MIT License
  */
@@ -21,7 +22,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
-#include "hardware/uart.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
 #include "hardware/timer.h"
 
 #include "srxl2.h"
@@ -29,20 +31,20 @@
 #include "srxl2_packet.h"
 #include "srxl2_telemetry.h"
 
-/* UART config */
-#define SRXL2_UART      uart0
-#define SRXL2_TX_PIN    0
-#define SRXL2_RX_PIN    1
+/* PIO half-duplex UART HAL (shared) */
+#include "pio_uart.pio.h"
+#include "pio_uart_hal.h"
+
+#define SRXL2_PIN       0       /* Single data pin (GPIO 0) */
+#define SRXL2_BAUD_INIT 115200
 
 #define LED_PIN         PICO_DEFAULT_LED_PIN
+
+static pio_uart_t pio_uart;
 
 /* Static allocation for srxl2 context (no malloc) */
 static uint8_t ctx_buf[sizeof(srxl2_ctx_t)] __attribute__((aligned(4)));
 static srxl2_ctx_t *ctx;
-
-/* Echo suppression: ignore RX bytes for this many us after TX */
-static uint64_t tx_done_us;
-#define ECHO_GUARD_US   2000  /* 2ms guard after last TX byte */
 
 /* Telemetry print rate limiting */
 static uint32_t last_telem_print_ms;
@@ -59,15 +61,13 @@ static uint32_t last_status_ms;
 static void hal_uart_send(void *user, const uint8_t *buf, uint8_t len)
 {
     (void)user;
-    uart_write_blocking(SRXL2_UART, buf, len);
-    /* Mark when TX finishes (byte time at 115200 ~ 87us) */
-    tx_done_us = time_us_64() + (uint64_t)len * 87;
+    pio_uart_send(&pio_uart, buf, len);
 }
 
 static void hal_uart_set_baud(void *user, uint32_t baud)
 {
     (void)user;
-    uart_set_baudrate(SRXL2_UART, baud);
+    pio_uart_set_baud(&pio_uart, baud);
 }
 
 static uint32_t hal_time_ms(void *user)
@@ -166,12 +166,8 @@ int main(void)
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
-    /* UART init -- both TX and RX for half-duplex bus */
-    uart_init(SRXL2_UART, 115200);
-    gpio_set_function(SRXL2_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(SRXL2_RX_PIN, GPIO_FUNC_UART);
-    uart_set_format(SRXL2_UART, 8, 1, UART_PARITY_NONE);
-    uart_set_hw_flow(SRXL2_UART, false, false);
+    /* Init PIO UART on single pin */
+    pio_uart_init(&pio_uart, pio0, SRXL2_PIN, SRXL2_BAUD_INIT);
 
     /* Wait for USB */
     uint32_t start = (uint32_t)(time_us_64() / 1000);
@@ -179,7 +175,8 @@ int main(void)
         tight_loop_contents();
 
     printf("\n=== SRXL2 Pico Master ===\n");
-    printf("UART0 (GPIO %d/%d) @ 115200, half-duplex\n", SRXL2_TX_PIN, SRXL2_RX_PIN);
+    printf("PIO UART on GPIO %d @ %u baud, single-wire half-duplex\n",
+           SRXL2_PIN, SRXL2_BAUD_INIT);
 
     /* Init libsrxl2 as master */
     srxl2_config_t cfg = {
@@ -213,16 +210,14 @@ int main(void)
 
     printf("Running...\n\n");
 
-    tx_done_us = 0;
     last_telem_print_ms = 0;
     last_status_ms = 0;
 
     while (true) {
-        /* Read UART, skip echo bytes */
-        while (uart_is_readable(SRXL2_UART)) {
-            uint8_t byte = uart_getc(SRXL2_UART);
-            if (time_us_64() > tx_done_us + ECHO_GUARD_US)
-                srxl2_feed(ctx, &byte, 1);
+        /* Read PIO RX FIFO -- no echo guard needed with PIO */
+        while (pio_uart_readable(&pio_uart)) {
+            uint8_t byte = pio_uart_getc(&pio_uart);
+            srxl2_feed(ctx, &byte, 1);
         }
 
         /* Tick state machine */

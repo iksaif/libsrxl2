@@ -1,13 +1,15 @@
 /*
- * SRXL2 Sniffer for Raspberry Pi Pico
+ * SRXL2 Sniffer for Raspberry Pi Pico (PIO UART)
  *
- * Passively sniffs SRXL2 bus traffic on UART0 and prints decoded
- * packet summaries over USB CDC serial.
+ * Passively sniffs SRXL2 bus traffic and prints decoded packet summaries
+ * over USB CDC serial.
+ *
+ * Uses PIO for single-pin RX (TX SM loaded but never used).
  *
  * Wiring:
- *   GPIO 1 (UART0 RX) -> SRXL2 bus data line (via level shifter if needed)
- *   GND               -> SRXL2 bus ground
- *   USB               -> Host computer (for decoded output)
+ *   GPIO 0              -> SRXL2 bus data line (single wire, RX only)
+ *   GND                 -> SRXL2 bus ground
+ *   USB                 -> Host computer (for decoded output)
  *
  * MIT License
  */
@@ -15,20 +17,24 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
-#include "hardware/uart.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
 
 #include "srxl2.h"
 #include "srxl2_packet.h"
 #include "srxl2_telemetry.h"
 
-/* UART config */
-#define SRXL2_UART      uart0
-#define SRXL2_BAUD_RATE 115200
-#define SRXL2_TX_PIN    0   /* not used for sniffer, but needed for init */
-#define SRXL2_RX_PIN    1
+/* PIO half-duplex UART HAL (shared) */
+#include "pio_uart.pio.h"
+#include "pio_uart_hal.h"
+
+#define SRXL2_PIN       0       /* Single data pin (GPIO 0) */
+#define SRXL2_BAUD_INIT 115200
 
 /* LED for packet indication */
 #define LED_PIN         PICO_DEFAULT_LED_PIN
+
+static pio_uart_t pio_uart;
 
 /* Frame assembly state */
 static uint8_t frame_buf[SRXL2_MAX_PACKET_SIZE];
@@ -163,25 +169,19 @@ int main(void)
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
-    /* UART init for SRXL2 bus input */
-    uart_init(SRXL2_UART, SRXL2_BAUD_RATE);
-    gpio_set_function(SRXL2_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(SRXL2_RX_PIN, GPIO_FUNC_UART);
-
-    /* 8N1 */
-    uart_set_format(SRXL2_UART, 8, 1, UART_PARITY_NONE);
-    uart_set_hw_flow(SRXL2_UART, false, false);
+    /* Init PIO UART on single pin (TX SM loaded but never used) */
+    pio_uart_init(&pio_uart, pio0, SRXL2_PIN, SRXL2_BAUD_INIT);
 
     printf("\n=== SRXL2 Pico Sniffer ===\n");
-    printf("UART0 RX (GPIO %d) @ %d baud\n", SRXL2_RX_PIN, SRXL2_BAUD_RATE);
+    printf("PIO UART RX on GPIO %d @ %u baud\n", SRXL2_PIN, SRXL2_BAUD_INIT);
     printf("Listening...\n\n");
 
     frame_pos = 0;
     pkt_count = 0;
 
     while (true) {
-        while (uart_is_readable(SRXL2_UART)) {
-            uint8_t byte = uart_getc(SRXL2_UART);
+        while (pio_uart_readable(&pio_uart)) {
+            uint8_t byte = pio_uart_getc(&pio_uart);
             feed_byte(byte);
         }
         /* Yield to USB CDC processing */

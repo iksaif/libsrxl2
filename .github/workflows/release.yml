@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -B build -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  package:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Package libsrxl2
+        run: |
+          dir="libsrxl2-${{ steps.version.outputs.version }}"
+          mkdir -p "$dir/include" "$dir/src"
+          cp libsrxl2/srxl2.h libsrxl2/srxl2_packet.h \
+             libsrxl2/srxl2_telemetry.h libsrxl2/srxl2_internal.h \
+             "$dir/include/"
+          cp libsrxl2/srxl2.c libsrxl2/srxl2_packet.c \
+             libsrxl2/srxl2_telemetry.c libsrxl2/srxl2_crc_table.inc \
+             "$dir/src/"
+          cp LICENSE "$dir/" 2>/dev/null || true
+          tar czf "libsrxl2-${{ steps.version.outputs.version }}.tar.gz" "$dir"
+
+      - name: Package srxl2-master (legacy)
+        run: |
+          dir="srxl2-master-${{ steps.version.outputs.version }}"
+          mkdir -p "$dir/srxl2" "$dir/master"
+          cp SRXL2/Source/spm_srxl.c SRXL2/Source/spm_srxl.h "$dir/srxl2/"
+          cp SRXL2_Master/spm_srxl_master.c SRXL2_Master/spm_srxl_master.h "$dir/master/"
+          cp LICENSE "$dir/" 2>/dev/null || true
+          tar czf "srxl2-master-${{ steps.version.outputs.version }}.tar.gz" "$dir"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            libsrxl2-${{ steps.version.outputs.version }}.tar.gz
+            srxl2-master-${{ steps.version.outputs.version }}.tar.gz
