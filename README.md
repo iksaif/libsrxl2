@@ -16,11 +16,12 @@ Open-source SRXL2 protocol library for third-party integrations (flight controll
 
 **This is a community project** -- not affiliated with Spektrum or Horizon Hobby. Contributions, bug reports, and hardware testing are all welcome. If you have a Spektrum Smart ESC, receiver, or battery, your feedback is invaluable.
 
-> **Hardware status:** The sniffer has been validated on real SRXL2 hardware
-> using a Bus Pirate 5 connected to a Spektrum receiver. The battery
-> simulator (fake slave) bidirectional communication is implemented but
-> not yet fully tested on hardware. Embedded targets (Pico, Arduino) are
-> implemented but not yet validated.
+> **Hardware status:** Pico embedded targets (FC slave, sniffer) validated on
+> an Arduino Nano RP2040 Connect with a Spektrum receiver. Channel data,
+> RSSI, and telemetry work correctly over PIO half-duplex single-pin UART.
+> Bus Pirate 5 passive sniffing also validated. Complex receivers
+> (AR10360T) require Forward Programming configuration and need more
+> investigation.
 
 ## Project Structure
 

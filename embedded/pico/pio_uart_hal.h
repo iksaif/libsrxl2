@@ -58,6 +58,14 @@ static inline void pio_uart_init(pio_uart_t *u, PIO pio, uint pin, uint baud)
     /* Load TX program (SM left stopped by uart_tx_program_init) */
     u->tx_offset = pio_add_program(pio, &uart_tx_program);
     uart_tx_program_init(pio, u->sm_tx, u->tx_offset, pin, baud);
+
+    /*
+     * Fix: uart_tx_program_init sets pindir to OUTPUT for SM_TX.
+     * PIO pin directions are OR'd across SMs, so the pin would be driven
+     * even with TX disabled.  Reset SM_TX's pindir to input here;
+     * pio_uart_send() will set it to output only during transmission.
+     */
+    pio_sm_set_consecutive_pindirs(pio, u->sm_tx, pin, 1, false);
 }
 
 /*
@@ -92,7 +100,8 @@ static inline void pio_uart_send(pio_uart_t *u, const uint8_t *buf, uint8_t len)
     /* 6. Disable TX SM */
     pio_sm_set_enabled(u->pio, u->sm_tx, false);
 
-    /* 7. Set pin back to input (high-Z, internal pull-up keeps line high) */
+    /* 7. Set pin back to input on BOTH SMs (PIO pindirs are OR'd) */
+    pio_sm_set_consecutive_pindirs(u->pio, u->sm_tx, u->pin, 1, false);
     pio_sm_set_consecutive_pindirs(u->pio, u->sm_rx, u->pin, 1, false);
 
     /* 8. Clear any stale data in RX FIFO, restart RX SM */

@@ -1,15 +1,17 @@
 /*
- * SRXL2 Sniffer for Raspberry Pi Pico (PIO UART)
+ * SRXL2 Sniffer for Raspberry Pi Pico
  *
  * Passively sniffs SRXL2 bus traffic and prints decoded packet summaries
  * over USB CDC serial.
  *
- * Uses PIO for single-pin RX (TX SM loaded but never used).
+ * Two UART backends (compile-time):
+ *   -DUSE_HW_UART   -> hardware UART RX-only (for debugging wiring)
+ *   default          -> PIO single-pin half-duplex (TX SM loaded but unused)
  *
  * Wiring:
- *   GPIO 0              -> SRXL2 bus data line (single wire, RX only)
- *   GND                 -> SRXL2 bus ground
- *   USB                 -> Host computer (for decoded output)
+ *   SRXL2_PIN (default GPIO 1) -> SRXL2 bus data line (RX only)
+ *   GND                        -> SRXL2 bus ground
+ *   USB                        -> Host computer (for decoded output)
  *
  * MIT License
  */
@@ -17,24 +19,37 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
+
+#ifdef USE_HW_UART
+#include "hardware/uart.h"
+#else
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
+#include "pio_uart.pio.h"
+#include "pio_uart_hal.h"
+#endif
 
 #include "srxl2.h"
 #include "srxl2_packet.h"
 #include "srxl2_telemetry.h"
 
-/* PIO half-duplex UART HAL (shared) */
-#include "pio_uart.pio.h"
-#include "pio_uart_hal.h"
+#include "board_config.h"
 
-#define SRXL2_PIN       0       /* Single data pin (GPIO 0) */
-#define SRXL2_BAUD_INIT 115200
-
-/* LED for packet indication */
+/* LED for status indication */
 #define LED_PIN         PICO_DEFAULT_LED_PIN
 
+#ifdef USE_HW_UART
+/* Pick UART instance based on pin (UART0: GPIO 1/13/17/29, UART1: GPIO 5/9/21/25) */
+#if (SRXL2_PIN == 1 || SRXL2_PIN == 13 || SRXL2_PIN == 17 || SRXL2_PIN == 29)
+#define SRXL2_UART uart0
+#elif (SRXL2_PIN == 5 || SRXL2_PIN == 9 || SRXL2_PIN == 21 || SRXL2_PIN == 25)
+#define SRXL2_UART uart1
+#else
+#error "SRXL2_PIN is not a valid UART RX pin"
+#endif
+#else
 static pio_uart_t pio_uart;
+#endif
 
 /* Frame assembly state */
 static uint8_t frame_buf[SRXL2_MAX_PACKET_SIZE];
@@ -42,6 +57,7 @@ static uint8_t frame_pos;
 static uint8_t frame_expected_len;
 
 static uint64_t pkt_count;
+static uint64_t byte_count;
 
 static void print_telemetry(const srxl2_pkt_telemetry_t *telem)
 {
@@ -88,8 +104,8 @@ static void process_frame(void)
         return;
     }
 
-    /* Blink LED on valid packet */
-    gpio_put(LED_PIN, 1);
+    /* LED off briefly while processing */
+    gpio_put(LED_PIN, 0);
 
     printf("#%llu %s", pkt_count, srxl2_packet_type_name(pkt.packet_type));
 
@@ -126,8 +142,8 @@ static void process_frame(void)
 
     printf("\n");
 
-    /* LED off after print */
-    gpio_put(LED_PIN, 0);
+    /* LED back on after processing */
+    gpio_put(LED_PIN, 1);
 }
 
 static void feed_byte(uint8_t byte)
@@ -161,6 +177,24 @@ static void feed_byte(uint8_t byte)
     }
 }
 
+static inline bool uart_rx_ready(void)
+{
+#ifdef USE_HW_UART
+    return uart_is_readable(SRXL2_UART);
+#else
+    return pio_uart_readable(&pio_uart);
+#endif
+}
+
+static inline uint8_t uart_rx_byte(void)
+{
+#ifdef USE_HW_UART
+    return (uint8_t)uart_getc(SRXL2_UART);
+#else
+    return pio_uart_getc(&pio_uart);
+#endif
+}
+
 int main(void)
 {
     stdio_init_all();
@@ -169,21 +203,56 @@ int main(void)
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
-    /* Init PIO UART on single pin (TX SM loaded but never used) */
+#ifdef USE_HW_UART
+    uart_init(SRXL2_UART, SRXL2_BAUD_INIT);
+    gpio_set_function(SRXL2_PIN, GPIO_FUNC_UART);
+    printf("\n=== SRXL2 Pico Sniffer (HW UART) ===\n");
+    printf("UART RX on GPIO %d @ %u baud\n", SRXL2_PIN, SRXL2_BAUD_INIT);
+#else
     pio_uart_init(&pio_uart, pio0, SRXL2_PIN, SRXL2_BAUD_INIT);
-
-    printf("\n=== SRXL2 Pico Sniffer ===\n");
+    printf("\n=== SRXL2 Pico Sniffer (PIO UART) ===\n");
     printf("PIO UART RX on GPIO %d @ %u baud\n", SRXL2_PIN, SRXL2_BAUD_INIT);
+#endif
     printf("Listening...\n\n");
 
     frame_pos = 0;
     pkt_count = 0;
+    byte_count = 0;
+
+    /* LED on = listening (alive) */
+    gpio_put(LED_PIN, 1);
+
+    uint64_t last_heartbeat_us = time_us_64();
+
+    /* Raw hex dump buffer for debugging (first N bytes when no packets) */
+    uint8_t raw_dump[32];
+    uint8_t raw_dump_pos = 0;
 
     while (true) {
-        while (pio_uart_readable(&pio_uart)) {
-            uint8_t byte = pio_uart_getc(&pio_uart);
+        while (uart_rx_ready()) {
+            uint8_t byte = uart_rx_byte();
+            byte_count++;
             feed_byte(byte);
+            /* Capture raw bytes for debug dump */
+            if (raw_dump_pos < sizeof(raw_dump))
+                raw_dump[raw_dump_pos++] = byte;
         }
+
+        /* Heartbeat every 2 seconds */
+        uint64_t now = time_us_64();
+        if (now - last_heartbeat_us >= 2000000) {
+            printf("[sniffer] alive  bytes=%llu pkts=%llu",
+                   byte_count, pkt_count);
+            /* If we have bytes but no packets, dump raw hex */
+            if (pkt_count == 0 && raw_dump_pos > 0) {
+                printf("  raw:");
+                for (uint8_t i = 0; i < raw_dump_pos; i++)
+                    printf(" %02X", raw_dump[i]);
+            }
+            printf("\n");
+            last_heartbeat_us = now;
+        }
+
         /* Yield to USB CDC processing */
         tight_loop_contents();
     }

@@ -38,8 +38,7 @@
 #include "pio_uart.pio.h"
 #include "pio_uart_hal.h"
 
-#define SRXL2_PIN       0       /* Single data pin (GPIO 0) */
-#define SRXL2_BAUD_INIT 115200
+#include "board_config.h"
 
 #define LED_PIN         PICO_DEFAULT_LED_PIN
 

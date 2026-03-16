@@ -3,11 +3,12 @@
 SRXL2 sniffer and bus master for embedded targets. These compile `libsrxl2`
 directly -- no OS, no dependencies beyond the vendor SDK.
 
-Each target provides four programs:
+Each target provides these programs:
 
 | Program | Role | Description |
 |---------|------|-------------|
-| **sniffer** | Passive | Decodes all bus traffic (RX only) |
+| **sniffer** | Passive | Decodes all bus traffic via PIO UART (RX only) |
+| **sniffer_uart** | Passive | HW UART debug variant for wiring verification (Pico only) |
 | **master** | Bus master | Runs handshake, sends channels, prints telemetry (TX+RX) |
 | **fc** | FC slave | Connects to a receiver, receives channels, sends FC telemetry (TX+RX) |
 | **battery** | Battery sensor | Simulates a 4S LiPo, sends FP_MAH telemetry when polled (TX+RX) |
@@ -29,7 +30,7 @@ cmake ..
 make -j
 ```
 
-Produces `sniffer_pico.uf2`, `master_pico.uf2`, `fc_pico.uf2`, and `battery_pico.uf2` for drag-drop flashing.
+Produces `sniffer_pico.uf2`, `sniffer_pico_uart.uf2`, `master_pico.uf2`, `fc_pico.uf2`, and `battery_pico.uf2` for drag-drop flashing.
 
 ### Flash
 
@@ -53,8 +54,8 @@ wiring works for the sniffer, master, FC, and battery:
 ```mermaid
 graph LR
     subgraph Pico
-        GPIO0["GPIO 0 (pin 1)"]
-        GND_P["GND (pin 3)"]
+        GPIO1["GPIO 1 (D0 on Nano RP2040)"]
+        GND_P["GND"]
         USB["USB"]
     end
     subgraph SRXL2 Bus
@@ -64,20 +65,22 @@ graph LR
     subgraph Host
         PC["Computer"]
     end
-    GPIO0 --- DATA
+    GPIO1 --- DATA
     GND_B --- GND_P
     USB --- PC
 ```
 
 > The PIO UART disables the RX state machine during TX, so there is no echo
 > and no guard timer needed. No external open-drain driver is required for
-> single-master configurations.
+> single-master configurations. The default GPIO is 1 (RX/D0 on Arduino
+> Nano RP2040 Connect); override with `-DSRXL2_PIN=<n>` at compile time.
+> On a plain Pico, any GPIO works.
 
 ### Output (Master)
 
 ```
 === SRXL2 Pico Master ===
-PIO UART on GPIO 0 @ 115200 baud, single-wire half-duplex
+PIO UART on GPIO 1 @ 115200 baud, single-wire half-duplex
 Running...
 
 [M] Handshake done, 1 peer(s)
@@ -90,13 +93,13 @@ Running...
 ```
 === SRXL2 Pico FC (Slave) ===
 Device ID: 0x30 (Flight Controller)
-PIO UART on GPIO 0 @ 115200 baud, single-wire half-duplex
+PIO UART on GPIO 1 @ 115200 baud, single-wire half-duplex
 Telemetry: FP_MAH (0x34), RPM (0x7E)
 
 Waiting for receiver handshake...
 
 [FC] Handshake done, 1 peer(s)
-[FC] CH: 32768 32768 32768 32768  RSSI:-50
+[FC] CH: 32768 32768 32768 32768  RSSI:100
 [FC] state=RUNNING peers=1  22.2V 12.5A 35mAh 15000RPM
 ```
 
@@ -105,7 +108,7 @@ Waiting for receiver handshake...
 ```
 === SRXL2 Pico Battery Sensor ===
 Device ID: 0xB0 (Sensor)
-PIO UART on GPIO 0 @ 115200 baud, single-wire half-duplex
+PIO UART on GPIO 1 @ 115200 baud, single-wire half-duplex
 Battery: 4S LiPo, 5000 mAh
 Telemetry: FP_MAH (0x34)
 
@@ -114,6 +117,27 @@ Waiting for master handshake...
 [BAT] Handshake done, 1 peer(s)
 [BAT] state=RUNNING peers=1  16.80V 5.00A 0/5000mAh (100.0%) 25.0C
 ```
+
+### Arduino Nano RP2040 Connect
+
+This board uses the RP2040 chip and works with the same Pico SDK build.
+The default GPIO 1 maps to the RX/D0 pin on this board.
+
+```bash
+cd embedded/pico
+mkdir build && cd build
+cmake .. -DPICO_BOARD=arduino_nano_rp2040_connect
+make -j
+```
+
+Flash with `picotool` (install via `brew install picotool`):
+
+```bash
+picotool reboot -f -u                     # force into BOOTSEL mode
+picotool load build/fc_pico.uf2 -f        # flash and auto-reboot
+```
+
+The USB CDC serial port appears as `/dev/cu.usbmodem*` on macOS.
 
 ## Arduino Nano 33 BLE (Rev2)
 
@@ -238,3 +262,6 @@ Telemetry: FP_MAH (0x34), RPM (0x7E)
 - Fixed at 115200 baud (no baud negotiation to 400000)
 - Arduino targets use hardware UART with echo guard; Pico targets use
   PIO half-duplex (no echo issue)
+- PIO pindir fix: the TX state machine's pin direction is reset to input
+  after init and after each send, since PIO pin directions are OR'd across
+  state machines (without this fix, the pin stays driven and RX cannot read)

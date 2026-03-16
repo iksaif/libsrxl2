@@ -24,6 +24,21 @@ pico_enable_stdio_usb(sniffer_pico 1)
 pico_enable_stdio_uart(sniffer_pico 0)
 pico_add_extra_outputs(sniffer_pico)
 
+# --- Sniffer HW UART variant (for wiring debug, standard UART RX) ---
+
+add_executable(sniffer_pico_uart
+    sniffer_pico.c
+    ${LIBSRXL2_DIR}/srxl2_packet.c
+    ${LIBSRXL2_DIR}/srxl2_telemetry.c
+)
+
+target_compile_definitions(sniffer_pico_uart PRIVATE USE_HW_UART)
+target_include_directories(sniffer_pico_uart PRIVATE ${LIBSRXL2_DIR})
+target_link_libraries(sniffer_pico_uart pico_stdlib hardware_uart)
+pico_enable_stdio_usb(sniffer_pico_uart 1)
+pico_enable_stdio_uart(sniffer_pico_uart 0)
+pico_add_extra_outputs(sniffer_pico_uart)
+
 # --- Master (full state machine, PIO half-duplex) ---
 
 add_executable(master_pico
