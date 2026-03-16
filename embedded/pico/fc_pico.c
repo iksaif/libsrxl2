@@ -1,5 +1,5 @@
 /*
- * SRXL2 Flight Controller Example for Raspberry Pi Pico
+ * SRXL2 Flight Controller Example for Raspberry Pi Pico (PIO UART)
  *
  * Demonstrates an FC connecting to a Spektrum SRXL2 receiver.
  * The receiver is bus master; the FC registers as a slave with
@@ -8,17 +8,16 @@
  *   - Flight Pack Capacity (0x34): battery current, mAh consumed
  *   - RPM/Volts/Temp (0x7E): motor RPM, pack voltage
  *
- * This is a reference implementation for integrating SRXL2 into
- * real FC firmware (iNav, ArduPilot, etc).
- *
- * Half-duplex: UART0 TX (GPIO 0) and RX (GPIO 1) are both wired
- * to the SRXL2 bus data line.
+ * Uses PIO for true single-pin half-duplex UART:
+ *   - SM0 = RX (runs when listening)
+ *   - SM1 = TX (enabled only during transmit)
+ *   - RX is disabled during TX, so no echo and no guard timer needed.
  *
  * Wiring:
- *   GPIO 0 (UART0 TX) -> SRXL2 bus data line (via open-drain / bus driver)
- *   GPIO 1 (UART0 RX) -> SRXL2 bus data line
- *   GND               -> SRXL2 bus ground
- *   USB               -> Host computer (debug output)
+ *   GPIO 0              -> SRXL2 bus data line (single wire)
+ *   GND                 -> SRXL2 bus ground
+ *   USB                 -> Host computer (debug output via CDC)
+ *   External 5V         -> Receiver VCC
  *
  * MIT License
  */
@@ -26,7 +25,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
-#include "hardware/uart.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
 #include "hardware/timer.h"
 
 #include "srxl2.h"
@@ -34,20 +34,26 @@
 #include "srxl2_packet.h"
 #include "srxl2_telemetry.h"
 
-/* UART config */
-#define SRXL2_UART      uart0
-#define SRXL2_TX_PIN    0
-#define SRXL2_RX_PIN    1
+/* Generated PIO header (built by pioasm from pio_uart.pio) */
+#include "pio_uart.pio.h"
+
+/* PIO / pin config */
+#define SRXL2_PIO       pio0
+#define SRXL2_SM_RX     0
+#define SRXL2_SM_TX     1
+#define SRXL2_PIN       0       /* Single data pin (GPIO 0) */
+#define SRXL2_BAUD_INIT 115200
 
 #define LED_PIN         PICO_DEFAULT_LED_PIN
+
+/* PIO program offsets (set during init) */
+static uint pio_rx_offset;
+static uint pio_tx_offset;
+static uint32_t current_baud;
 
 /* Static allocation for srxl2 context (no malloc) */
 static uint8_t ctx_buf[sizeof(srxl2_ctx_t)] __attribute__((aligned(4)));
 static srxl2_ctx_t *ctx;
-
-/* Echo suppression: ignore RX bytes for this many us after TX */
-static uint64_t tx_done_us;
-#define ECHO_GUARD_US   2000  /* 2ms guard after last TX byte */
 
 /* Print rate limiting */
 static uint32_t last_chan_print_ms;
@@ -67,20 +73,93 @@ static uint32_t last_sensor_update_ms;
 static uint8_t telem_index;
 
 /*---------------------------------------------------------------------------
- * HAL callbacks
+ * PIO UART helpers
+ *---------------------------------------------------------------------------*/
+
+static void pio_uart_init(uint pin, uint baud)
+{
+    current_baud = baud;
+
+    /* Load RX program */
+    pio_rx_offset = pio_add_program(SRXL2_PIO, &uart_rx_program);
+    uart_rx_program_init(SRXL2_PIO, SRXL2_SM_RX, pio_rx_offset, pin, baud);
+
+    /* Load TX program */
+    pio_tx_offset = pio_add_program(SRXL2_PIO, &uart_tx_program);
+    uart_tx_program_init(SRXL2_PIO, SRXL2_SM_TX, pio_tx_offset, pin, baud);
+    /* TX SM is NOT enabled -- uart_tx_program_init leaves it stopped */
+}
+
+static void pio_uart_set_baud(uint baud)
+{
+    current_baud = baud;
+    float div = (float)clock_get_hz(clk_sys) / (8.0f * baud);
+    pio_sm_set_clkdiv(SRXL2_PIO, SRXL2_SM_RX, div);
+    pio_sm_set_clkdiv(SRXL2_PIO, SRXL2_SM_TX, div);
+    /* Clkdiv takes effect after restart/next instruction boundary */
+}
+
+/*---------------------------------------------------------------------------
+ * HAL callbacks for libsrxl2
  *---------------------------------------------------------------------------*/
 
 static void hal_uart_send(void *user, const uint8_t *buf, uint8_t len)
 {
     (void)user;
-    uart_write_blocking(SRXL2_UART, buf, len);
-    tx_done_us = time_us_64() + (uint64_t)len * 87;
+
+    /* 1. Disable RX SM */
+    pio_sm_set_enabled(SRXL2_PIO, SRXL2_SM_RX, false);
+
+    /* 2. Set pin as output for TX */
+    pio_sm_set_consecutive_pindirs(SRXL2_PIO, SRXL2_SM_TX, SRXL2_PIN, 1, true);
+
+    /* 3. Restart TX SM from the beginning of its program */
+    pio_sm_restart(SRXL2_PIO, SRXL2_SM_TX);
+    pio_sm_exec(SRXL2_PIO, SRXL2_SM_TX,
+                pio_encode_jmp(pio_tx_offset));
+    pio_sm_set_enabled(SRXL2_PIO, SRXL2_SM_TX, true);
+
+    /* 4. Write bytes to TX FIFO */
+    for (uint8_t i = 0; i < len; i++) {
+        /* TX program pulls 32-bit words, data in bits [7:0] */
+        pio_sm_put_blocking(SRXL2_PIO, SRXL2_SM_TX, (uint32_t)buf[i]);
+    }
+
+    /* 5. Wait for TX to finish: FIFO drains + last byte clocks out
+     *    Each byte = 10 bit-times (start + 8 data + stop)
+     *    Bit time at 115200 = ~8.68us, at 400000 = 2.5us
+     *    Wait for FIFO to drain, then one extra byte time for the
+     *    last byte being shifted out */
+
+    /* Wait until TX FIFO is empty */
+    while (!pio_sm_is_tx_fifo_empty(SRXL2_PIO, SRXL2_SM_TX))
+        tight_loop_contents();
+
+    /* Wait for the last byte to finish shifting out.
+     * The pull instruction stalls when FIFO is empty, so once we see
+     * FIFO empty AND the SM stalls, the last bit has been sent.
+     * Conservative: wait one full byte time after FIFO empty. */
+    uint32_t byte_us = (10 * 1000000UL) / current_baud;
+    busy_wait_us(byte_us + 5);
+
+    /* 6. Disable TX SM */
+    pio_sm_set_enabled(SRXL2_PIO, SRXL2_SM_TX, false);
+
+    /* 7. Set pin back to input (high-Z, internal pull-up keeps line high) */
+    pio_sm_set_consecutive_pindirs(SRXL2_PIO, SRXL2_SM_RX, SRXL2_PIN, 1, false);
+
+    /* 8. Clear any stale data in RX FIFO, restart RX SM */
+    pio_sm_clear_fifos(SRXL2_PIO, SRXL2_SM_RX);
+    pio_sm_restart(SRXL2_PIO, SRXL2_SM_RX);
+    pio_sm_exec(SRXL2_PIO, SRXL2_SM_RX,
+                pio_encode_jmp(pio_rx_offset));
+    pio_sm_set_enabled(SRXL2_PIO, SRXL2_SM_RX, true);
 }
 
 static void hal_uart_set_baud(void *user, uint32_t baud)
 {
     (void)user;
-    uart_set_baudrate(SRXL2_UART, baud);
+    pio_uart_set_baud(baud);
 }
 
 static uint32_t hal_time_ms(void *user)
@@ -204,12 +283,8 @@ int main(void)
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
-    /* UART init */
-    uart_init(SRXL2_UART, 115200);
-    gpio_set_function(SRXL2_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(SRXL2_RX_PIN, GPIO_FUNC_UART);
-    uart_set_format(SRXL2_UART, 8, 1, UART_PARITY_NONE);
-    uart_set_hw_flow(SRXL2_UART, false, false);
+    /* Init PIO UART on single pin */
+    pio_uart_init(SRXL2_PIN, SRXL2_BAUD_INIT);
 
     /* Wait for USB CDC */
     uint32_t start = (uint32_t)(time_us_64() / 1000);
@@ -218,7 +293,8 @@ int main(void)
 
     printf("\n=== SRXL2 Pico FC (Slave) ===\n");
     printf("Device ID: 0x30 (Flight Controller)\n");
-    printf("UART0 (GPIO %d/%d) @ 115200, half-duplex\n", SRXL2_TX_PIN, SRXL2_RX_PIN);
+    printf("PIO UART on GPIO %d @ %u baud, single-wire half-duplex\n",
+           SRXL2_PIN, SRXL2_BAUD_INIT);
     printf("Telemetry: FP_MAH (0x34), RPM (0x7E)\n\n");
 
     /* Init libsrxl2 as SLAVE with FC device ID */
@@ -248,18 +324,16 @@ int main(void)
 
     printf("Waiting for receiver handshake...\n\n");
 
-    tx_done_us = 0;
     last_chan_print_ms = 0;
     last_status_ms = 0;
     last_sensor_update_ms = 0;
     telem_index = 0;
 
     while (true) {
-        /* Read UART, skip echo bytes */
-        while (uart_is_readable(SRXL2_UART)) {
-            uint8_t byte = uart_getc(SRXL2_UART);
-            if (time_us_64() > tx_done_us + ECHO_GUARD_US)
-                srxl2_feed(ctx, &byte, 1);
+        /* Read PIO RX FIFO -- no echo guard needed with PIO */
+        while (!pio_sm_is_rx_fifo_empty(SRXL2_PIO, SRXL2_SM_RX)) {
+            uint8_t byte = (uint8_t)(pio_sm_get(SRXL2_PIO, SRXL2_SM_RX) >> 24);
+            srxl2_feed(ctx, &byte, 1);
         }
 
         /* Tick state machine */

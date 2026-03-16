@@ -24,7 +24,7 @@ extern "C" {
 
 /* Timing (milliseconds) */
 #define SRXL2_STARTUP_DELAY_MS      50
-#define SRXL2_HANDSHAKE_TIMEOUT_MS  500
+#define SRXL2_HANDSHAKE_TIMEOUT_MS  200
 #define SRXL2_RUNNING_TIMEOUT_MS    50
 #define SRXL2_FRAME_PERIOD_115200   11  /* ms between frames at 115200 */
 #define SRXL2_FRAME_PERIOD_400000   6   /* ms between frames at 400000 */

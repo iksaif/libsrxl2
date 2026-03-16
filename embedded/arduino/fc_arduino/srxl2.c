@@ -543,21 +543,19 @@ static void tick_startup(srxl2_ctx_t *ctx)
         ctx->peer_count = 0;
         ctx->peer_priority_sum = 0;
     } else {
-        /* Slave: optionally send unprompted broadcast (unit_id==0 per spec).
-         * Disabled by default -- collides with master traffic on active bus. */
-        if (ctx->config.unprompted_hs) {
-            uint8_t unit_id = ctx->config.device.device_id & 0x0F;
-            if (unit_id == 0) {
-                uint8_t len = srxl2_pkt_handshake(
-                    ctx->tx_buf,
-                    ctx->config.device.device_id,
-                    0x00,
-                    ctx->config.device.priority,
-                    ctx->config.baud_supported,
-                    ctx->config.device.info,
-                    ctx->config.device.uid);
-                hal_send(ctx, ctx->tx_buf, len);
-            }
+        /* Slave: unit_id=0 means lower nibble of device_id is 0 */
+        uint8_t unit_id = ctx->config.device.device_id & 0x0F;
+        if (unit_id == 0) {
+            /* Send unprompted handshake */
+            uint8_t len = srxl2_pkt_handshake(
+                ctx->tx_buf,
+                ctx->config.device.device_id,
+                0x00,
+                ctx->config.device.priority,
+                ctx->config.baud_supported,
+                ctx->config.device.info,
+                ctx->config.device.uid);
+            hal_send(ctx, ctx->tx_buf, len);
         }
         enter_state(ctx, SRXL2_STATE_HANDSHAKE);
     }
@@ -605,10 +603,8 @@ static void tick_handshake_master(srxl2_ctx_t *ctx)
 
 static void tick_handshake_slave(srxl2_ctx_t *ctx)
 {
-    /* Timeout: go back to startup only if the bus is silent.
-     * If we're receiving valid packets (last_rx_ms is recent),
-     * keep waiting -- the master just hasn't addressed us yet. */
-    if (time_since_rx(ctx) >= SRXL2_HANDSHAKE_TIMEOUT_MS) {
+    /* Timeout: go back to startup */
+    if (time_in_state(ctx) >= SRXL2_HANDSHAKE_TIMEOUT_MS) {
         ctx->negotiated_baud = SRXL2_BAUD_115200;
         hal_set_baud(ctx, 115200);
         enter_state(ctx, SRXL2_STATE_STARTUP);
@@ -664,11 +660,6 @@ static void tick_running_slave(srxl2_ctx_t *ctx)
     if (ctx->reply_pending) {
         ctx->reply_pending = false;
 
-        /* Fire TELEM_REQUEST so app can fill telemetry just-in-time */
-        srxl2_event_t evt = {0};
-        evt.type = SRXL2_EVT_TELEM_REQUEST;
-        fire_event(ctx, &evt);
-
         /* Check pending TX flags first */
         if (!send_pending_tx(ctx, ctx->reply_to_id)) {
             slave_send_telemetry(ctx);
@@ -687,9 +678,6 @@ static void init_ctx(srxl2_ctx_t *ctx, const srxl2_config_t *config)
     ctx->is_master = (config->role == SRXL2_ROLE_MASTER);
     ctx->negotiated_baud = SRXL2_BAUD_115200;
     ctx->hs_baud_and = config->baud_supported;
-
-    /* Slave telemetry output starts invalid (zero payload) */
-    ctx->telem_out_valid = false;
 
     /* Populate default handshake scan table */
     memcpy(ctx->hs_scan_table, default_scan_ids, SRXL2_SCAN_TABLE_SIZE);

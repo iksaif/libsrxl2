@@ -126,9 +126,6 @@ typedef struct {
     srxl2_device_t device;
     srxl2_hal_t    hal;
     uint8_t        baud_supported;  /* SRXL2_BAUD_* flags */
-    bool           unprompted_hs;   /* slave: send broadcast handshake on startup
-                                     * (unit_id==0 per spec). Default false --
-                                     * collides with master traffic on active bus. */
 } srxl2_config_t;
 
 /* Channel data */
@@ -167,7 +164,6 @@ typedef enum {
     SRXL2_EVT_FWD_PGM,             /* forward programming data */
     SRXL2_EVT_HANDSHAKE_COMPLETE,   /* handshake phase done */
     SRXL2_EVT_TIMEOUT,             /* connection lost */
-    SRXL2_EVT_TELEM_REQUEST,       /* master is polling us for telemetry (slave) */
 } srxl2_event_type_t;
 
 /* Event structure (tagged union) */

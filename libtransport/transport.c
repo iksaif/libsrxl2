@@ -62,8 +62,8 @@ static speed_t baud_to_speed(transport_baud_t baud)
 
 static bool serial_open(transport_handle_t* handle, const char* device, transport_baud_t baud)
 {
-    // Open serial port
-    handle->data.serial.fd = open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    // Open serial port (blocking mode -- we use VTIME for timeouts)
+    handle->data.serial.fd = open(device, O_RDWR | O_NOCTTY);
     if (handle->data.serial.fd < 0) {
         fprintf(stderr, "Failed to open serial port %s: %s\n", device, strerror(errno));
         return false;
@@ -96,9 +96,9 @@ static bool serial_open(transport_handle_t* handle, const char* device, transpor
     tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
     tty.c_oflag &= ~OPOST;
 
-    // Non-blocking read
+    // Blocking read with 100ms timeout (VTIME is in 1/10s units)
     tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 0;
+    tty.c_cc[VTIME] = 1;  // 100ms timeout
 
     // Apply settings
     if (tcsetattr(handle->data.serial.fd, TCSANOW, &tty) != 0) {
@@ -129,26 +129,14 @@ static int serial_send(transport_handle_t* handle, const uint8_t* data, size_t l
 
 static int serial_receive(transport_handle_t* handle, uint8_t* buffer, size_t buffer_size, int timeout_ms)
 {
-    if (timeout_ms > 0) {
-        // Use select for timeout
-        fd_set readfds;
-        struct timeval tv;
-
-        FD_ZERO(&readfds);
-        FD_SET(handle->data.serial.fd, &readfds);
-
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-        int ret = select(handle->data.serial.fd + 1, &readfds, NULL, NULL, &tv);
-        if (ret < 0) {
-            return -1;  // Error
-        } else if (ret == 0) {
-            return 0;   // Timeout
-        }
+    (void)timeout_ms;  // VTIME handles the timeout
+    int n = (int)read(handle->data.serial.fd, buffer, buffer_size);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
+        return -1;
     }
-
-    return read(handle->data.serial.fd, buffer, buffer_size);
+    return n;
 }
 
 #else

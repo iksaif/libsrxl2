@@ -34,6 +34,7 @@
 
 static volatile bool g_running = true;
 static transport_handle_t *g_transport = NULL;
+static bool g_verbose = false;
 
 /*---------------------------------------------------------------------------
  * Battery simulation state
@@ -110,6 +111,11 @@ static void signal_handler(int sig)
 static void hal_uart_send(void *user, const uint8_t *buf, uint8_t len)
 {
     (void)user;
+    if (g_verbose) {
+        printf("[TX %3d] ", len);
+        for (int i = 0; i < len; i++) printf("%02X ", buf[i]);
+        printf("\n");
+    }
     transport_send(g_transport, buf, len);
 }
 
@@ -156,7 +162,14 @@ static void on_event(srxl2_ctx_t *ctx, const srxl2_event_t *evt, void *user)
         printf("[Battery] Connection timeout, restarting discovery\n");
         break;
 
+    case SRXL2_EVT_TELEM_REQUEST:
+        if (g_verbose)
+            printf("[Battery] Telemetry requested by master\n");
+        break;
+
     default:
+        if (g_verbose)
+            printf("[Battery] Event: %d\n", evt->type);
         break;
     }
 }
@@ -172,6 +185,7 @@ static void print_usage(const char *prog)
     printf("  -s, --serial          Use USB-to-serial instead of fakeuart\n");
     printf("  -B, --baud <rate>     Baud rate: 115200 or 400000 (default: 115200)\n");
     printf("  -i, --id <0xB0-0xBF>  Device ID (default: 0xB0)\n");
+    printf("  -v, --verbose         Verbose debug output (RX bytes, state, TX)\n");
     printf("  -l, --list-ports      List available serial ports and exit\n");
     printf("  -h, --help            Show this help\n");
 }
@@ -188,13 +202,14 @@ int main(int argc, char *argv[])
         {"serial",     no_argument,       NULL, 's'},
         {"baud",       required_argument, NULL, 'B'},
         {"id",         required_argument, NULL, 'i'},
+        {"verbose",    no_argument,       NULL, 'v'},
         {"list-ports", no_argument,       NULL, 'l'},
         {"help",       no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:sB:i:lh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:sB:i:vlh", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'd':
             device = optarg;
@@ -213,13 +228,16 @@ int main(int argc, char *argv[])
         }
         case 'i': {
             unsigned long val = strtoul(optarg, NULL, 0);
-            if ((val & 0xF0) != 0xB0 || val > 0xBF) {
-                fprintf(stderr, "Device ID must be in range 0xB0-0xBF\n");
+            if (val > 0xFF) {
+                fprintf(stderr, "Device ID must be in range 0x00-0xFF\n");
                 return 1;
             }
             device_id = (uint8_t)val;
             break;
         }
+        case 'v':
+            g_verbose = true;
+            break;
         case 'l':
             transport_list_serial_ports();
             return 0;
@@ -281,16 +299,33 @@ int main(int argc, char *argv[])
 
     struct timespec last_batt_update;
     clock_gettime(CLOCK_MONOTONIC, &last_batt_update);
+    const char *last_state = "";
+    uint32_t rx_total = 0;
 
     while (g_running) {
         /* Receive from bus (1ms timeout) */
         uint8_t buf[128];
         int n = transport_receive(g_transport, buf, sizeof(buf), 1, NULL, 0);
-        if (n > 0)
+        if (n > 0) {
+            rx_total += (uint32_t)n;
+            if (g_verbose) {
+                printf("[RX %3d] ", n);
+                for (int i = 0; i < n && i < 32; i++) printf("%02X ", buf[i]);
+                if (n > 32) printf("...");
+                printf("\n");
+            }
             srxl2_feed(ctx, buf, (size_t)n);
+        }
 
         /* Tick state machine */
         srxl2_tick(ctx);
+
+        /* Log state changes */
+        const char *cur_state = srxl2_get_state(ctx);
+        if (cur_state != last_state) {
+            printf("[Battery] State: %s (rx_total=%u bytes)\n", cur_state, rx_total);
+            last_state = cur_state;
+        }
 
         /* Update battery physics and telemetry every 100ms */
         struct timespec now;

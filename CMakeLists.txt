@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(SRXL2_Experiments C)
+project(libsrxl2 C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -152,14 +152,14 @@ if(CURSES_FOUND)
     target_compile_definitions(srxl2_sniffer PRIVATE HAVE_NCURSES)
     target_include_directories(srxl2_sniffer PRIVATE ${CURSES_INCLUDE_DIRS})
     target_link_libraries(srxl2_sniffer
-        srxl2_new
+        libsrxl2
         transport
         ${CURSES_LIBRARIES}
     )
     message(STATUS "Building sniffer with ncurses support (state format available)")
 else()
     target_link_libraries(srxl2_sniffer
-        srxl2_new
+        libsrxl2
         transport
     )
     message(STATUS "Building sniffer without ncurses support (state format unavailable)")
@@ -169,31 +169,31 @@ endif()
 # New Simulation Programs (using libsrxl2)
 ###############################################################################
 
-# SRXL2 New Master Simulator (libsrxl2)
+# SRXL2 Master Simulator (libsrxl2)
 add_executable(srxl2_new_master_sim
     programs/srxl2_new_master_sim.c
 )
 target_include_directories(srxl2_new_master_sim PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
-    ${CMAKE_CURRENT_SOURCE_DIR}/fakeuart
+    ${CMAKE_CURRENT_SOURCE_DIR}/libtransport
 )
 target_link_libraries(srxl2_new_master_sim
-    srxl2_new
-    fakeuart
+    libsrxl2
+    transport
     m
 )
 
-# SRXL2 New Battery Simulator (libsrxl2)
+# SRXL2 Battery Simulator (libsrxl2)
 add_executable(srxl2_new_battery_sim
     programs/srxl2_new_battery_sim.c
 )
 target_include_directories(srxl2_new_battery_sim PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
-    ${CMAKE_CURRENT_SOURCE_DIR}/fakeuart
+    ${CMAKE_CURRENT_SOURCE_DIR}/libtransport
 )
 target_link_libraries(srxl2_new_battery_sim
-    srxl2_new
-    fakeuart
+    libsrxl2
+    transport
     m
 )
 
@@ -217,10 +217,10 @@ option(BUILD_TESTS "Build test suite" ON)
 if(BUILD_TESTS)
     enable_testing()
 
-    # Unit tests (link srxl2_new — no SRXL2 state machine)
+    # Unit tests (link libsrxl2 — no SRXL2 state machine)
     foreach(test_name test_crc test_parser test_telemetry)
         add_executable(${test_name} tests/${test_name}.c)
-        target_link_libraries(${test_name} srxl2_new m)
+        target_link_libraries(${test_name} libsrxl2 m)
         target_include_directories(${test_name} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
             ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
@@ -257,22 +257,22 @@ endif()
 # libsrxl2 — Modern SRXL2 Stack
 ###############################################################################
 
-add_library(srxl2_new STATIC
+add_library(libsrxl2 STATIC
     libsrxl2/srxl2.c
     libsrxl2/srxl2_packet.c
     libsrxl2/srxl2_telemetry.c
 )
-target_include_directories(srxl2_new PUBLIC
+target_include_directories(libsrxl2 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
 )
 # Optional: small CRC mode (bitwise instead of table lookup)
-# target_compile_definitions(srxl2_new PRIVATE SRXL2_CRC_SMALL)
+# target_compile_definitions(libsrxl2 PRIVATE SRXL2_CRC_SMALL)
 
 if(BUILD_TESTS)
     # New lib tests
     foreach(test_name test_srxl2_packet test_srxl2_master test_srxl2_slave test_srxl2_interop)
         add_executable(${test_name} tests/${test_name}.c)
-        target_link_libraries(${test_name} srxl2_new m)
+        target_link_libraries(${test_name} libsrxl2 m)
         target_include_directories(${test_name} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
             ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
@@ -282,7 +282,7 @@ if(BUILD_TESTS)
 
     # Shared scenario tests — new lib runner
     add_executable(test_scenarios_new tests/test_scenarios_new.c)
-    target_link_libraries(test_scenarios_new srxl2_new m)
+    target_link_libraries(test_scenarios_new libsrxl2 m)
     target_include_directories(test_scenarios_new PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/tests
         ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
@@ -308,7 +308,7 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master
         ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
     )
-    target_link_libraries(test_scenarios_legacy srxl2_new m)
+    target_link_libraries(test_scenarios_legacy libsrxl2 m)
     add_test(NAME test_scenarios_legacy COMMAND test_scenarios_legacy)
 endif()
 
@@ -326,7 +326,7 @@ install(TARGETS
 )
 
 install(TARGETS
-    srxl2_new
+    libsrxl2
     transport
     fakeuart
     DESTINATION lib
@@ -355,7 +355,7 @@ install(FILES
 
 message(STATUS "")
 message(STATUS "═══════════════════════════════════════════════")
-message(STATUS "SRXL2 Experiments Configuration")
+message(STATUS "libsrxl2 Configuration")
 message(STATUS "═══════════════════════════════════════════════")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C Compiler: ${CMAKE_C_COMPILER}")

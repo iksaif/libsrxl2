@@ -1,6 +1,26 @@
+<p align="center">
+  <img src="logo.svg" alt="SRXL2" width="420">
+</p>
+
+<p align="center">
+  <a href="https://github.com/iksaif/libsrxl2/actions/workflows/ci.yml"><img src="https://github.com/iksaif/libsrxl2/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/language-C11-blue" alt="C11">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Pico%20%7C%20Arduino-orange" alt="Platforms">
+  <img src="https://img.shields.io/badge/protocol-SRXL2-blueviolet" alt="SRXL2">
+</p>
+
 # SRXL2 Experiments
 
-SRXL2 bus master and protocol stack for controlling Spektrum Smart ESCs and reading Smart Battery telemetry, targeting FC firmware (iNav/ArduPilot).
+Open-source SRXL2 bus master and protocol stack for controlling Spektrum Smart ESCs and reading Smart Battery telemetry, targeting FC firmware and custom hardware. Includes a real-time sniffer for decoding SRXL2 traffic on the bench.
+
+**This is a community project** -- not affiliated with Spektrum or Horizon Hobby. Contributions, bug reports, and hardware testing are all welcome. If you have a Spektrum Smart ESC, receiver, or battery, your feedback is invaluable.
+
+> **Hardware status:** The sniffer has been validated on real SRXL2 hardware
+> using a Bus Pirate 5 connected to a Spektrum receiver. The battery
+> simulator (fake slave) bidirectional communication is implemented but
+> not yet fully tested on hardware. Embedded targets (Pico, Arduino) are
+> implemented but not yet validated.
 
 ## Project Structure
 
@@ -12,6 +32,7 @@ SRXL2 bus master and protocol stack for controlling Spektrum Smart ESCs and read
 ├── fakeuart/           UDP multicast virtual UART (simulates half-duplex bus)
 ├── libtransport/       Abstraction over fakeuart and serial ports
 ├── programs/           Simulation programs
+├── embedded/           Embedded sniffers (Pico, Arduino)
 ├── tests/              Test suite (11 tests)
 └── SpektrumDocumentation/  Spektrum telemetry definitions (submodule)
 ```
@@ -32,8 +53,8 @@ The official Spektrum library with a custom master implementation. Still works, 
 ## Building
 
 ```bash
-git clone --recursive <repository-url>
-cd srxl2-experiments
+git clone --recursive https://github.com/iksaif/libsrxl2.git
+cd libsrxl2
 mkdir build && cd build
 cmake .. -DBUILD_TESTS=ON
 make -j
@@ -78,13 +99,106 @@ The master discovers the battery via handshake, sends channel data every 11ms, a
 
 ### Options
 
+All new programs support both simulated (fakeuart) and real (USB-to-serial) transports:
+
 ```
-srxl2_new_master_sim  [--bus <name>] [--help]
-srxl2_new_battery_sim [--bus <name>] [--id <0xB0-0xBF>] [--help]
-srxl2_sniffer         [--bus <name>] [--format hex|state] [--help]
+srxl2_new_master_sim  [-d <name>] [-s] [-B <rate>] [-h]
+srxl2_new_battery_sim [-d <name>] [-s] [-B <rate>] [-i <0xB0-0xBF>] [-h]
+srxl2_sniffer         [-d <name>] [-s] [-B <rate>] [-f details|json|oneline|state] [-x] [-n] [-h]
 ```
 
-Different bus names create isolated virtual buses (UDP multicast groups).
+Long forms (`--device`, `--serial`, `--baud`, etc.) also work.
+
+Simulation mode (default): different bus names create isolated virtual buses (UDP multicast groups).
+
+Serial mode example:
+
+```bash
+./build/srxl2_sniffer --serial --device /dev/cu.usbserial-1420
+./build/srxl2_new_master_sim --serial --device /dev/cu.usbserial-1420
+```
+
+## Hardware Testing with Bus Pirate 5
+
+The sniffer and simulators can be connected to real SRXL2 hardware using a
+Bus Pirate 5 as a USB-to-serial bridge.
+
+### Wiring
+
+```
+Bus Pirate 5        Spektrum Receiver
+────────────        ─────────────────
+VOUT (5V)  ───────  VCC
+GND        ───────  GND
+RX         ───────  SRXL2 Data
+```
+
+The receiver needs 5V (check your receiver's specs). The BP5 VOUT can supply
+this for bench testing without servos. Bidirectional communication (slave/master
+sim) requires half-duplex TX+RX on a single wire -- this has not yet been
+validated with the BP5.
+
+### Bus Pirate 5 Configuration
+
+Connect to the BP5 CLI (e.g., `tio /dev/cu.usbmodem5buspirate1`):
+
+```
+W 5          # Enable 5V power supply
+m 3          # Select UART mode (NOT HDUART -- m 4 may produce garbled data)
+             # Configure: 115200 baud, 8N1, no flow control, non-inverted
+bridge       # Enter transparent bridge mode (use -s for echo suppression)
+```
+
+Exit tio (`Ctrl-T q`), then run the sniffer or simulator on the same port.
+
+### Sniffing
+
+```bash
+# Detailed view with hex dump
+./build/srxl2_sniffer --serial --device /dev/cu.usbmodem5buspirate1 -f details --hex
+
+# Compact one-line format
+./build/srxl2_sniffer --serial --device /dev/cu.usbmodem5buspirate1 -f oneline
+
+# JSON output (pipe to file or jq)
+./build/srxl2_sniffer --serial --device /dev/cu.usbmodem5buspirate1 -f json | tee capture.jsonl
+
+# ncurses live state view
+./build/srxl2_sniffer --serial --device /dev/cu.usbmodem5buspirate1 -f state
+```
+
+### Prerequisites
+
+The BP5 firmware must include [PR #295](https://github.com/DangerousPrototypes/BusPirate5-firmware/pull/295)
+(UART bridge fix) for the sniffer to receive data correctly. This fix is
+included in BP5 firmware releases after that PR was merged.
+
+### Known Issues
+
+- **Use `m 3` (UART), not `m 4` (HDUART)** -- HDUART mode on the BP5 produces
+  garbled data (byte-level corruption, no valid `0xA6` magic bytes).
+- **USB latency** -- Bidirectional SRXL2 through a USB-serial bridge is not
+  feasible: the USB round-trip (~3-5ms) exceeds the SRXL2 response window
+  within an 11ms frame. Use an embedded target (Pico, Arduino) for slave/master
+  roles. The BP5 bridge works well for passive sniffing.
+- **macOS USB CDC quirk** -- The serial transport uses blocking reads with
+  `VTIME` timeout. Non-blocking `select()` does not work reliably on macOS
+  with BP5 USB CDC ports.
+- **Baud rate 400000** -- macOS maps 400000 to 230400 (closest standard rate),
+  which won't work. Stick with 115200 for testing.
+
+## Embedded Programs
+
+SRXL2 sniffer, bus master, and flight controller for Raspberry Pi Pico and
+Arduino Nano 33 BLE. These compile `libsrxl2` directly for embedded targets --
+no OS, no dependencies beyond the vendor SDK.
+
+The **FC example** (`fc_pico`, `fc_arduino`) registers as a Flight Controller
+(device ID 0x30) slave, receives channel data from a Spektrum receiver, and
+sends back FP_MAH + RPM telemetry. This is a reference for integrating SRXL2
+into real FC firmware (iNav, ArduPilot).
+
+See [embedded/README.md](embedded/README.md) for build instructions and wiring.
 
 ## Protocol Overview
 
@@ -99,6 +213,15 @@ Key packet types:
 - `0xCD` Control Data -- RC channels + telemetry poll
 - `0x80` Telemetry -- 16-byte X-Bus sensor payload
 - `0x41` Bind -- bind mode management
+
+## Contributing
+
+This is a community project and contributions are welcome! Some ways to help:
+
+- **Test on real hardware** -- If you have a Spektrum Smart ESC, receiver, or battery, try the sniffer or master and report what works (or doesn't)
+- **Port to your FC** -- The libsrxl2 stack is designed to be embedded in iNav, ArduPilot, or any RTOS
+- **Add telemetry types** -- The decoder covers ESC, FP_MAH, LiPo, RPM, and Smart Battery, but more X-Bus sensors exist
+- **Bug reports and PRs** -- Open an issue or send a pull request
 
 ## License
 

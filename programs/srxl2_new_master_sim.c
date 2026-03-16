@@ -5,7 +5,13 @@
  * Performs device discovery, sends channel data every 11ms,
  * polls slaves for telemetry.
  *
- * Usage: ./srxl2_new_master_sim [--bus <name>] [--help]
+ * Supports both simulated (fakeuart) and real hardware (USB-to-serial).
+ *
+ * Usage: ./srxl2_new_master_sim [options]
+ *   --device <name>   Device (bus name for fakeuart, /dev/tty* for serial)
+ *   --serial          Use USB-to-serial instead of fakeuart
+ *   --baud <rate>     Baud rate: 115200 or 400000 (default: 115200)
+ *   --help
  *
  * MIT License
  */
@@ -17,12 +23,14 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <getopt.h>
 
 #include "srxl2.h"
 #include "srxl2_telemetry.h"
-#include "fakeuart.h"
+#include "transport.h"
 
 static volatile bool g_running = true;
+static transport_handle_t *g_transport = NULL;
 
 static void signal_handler(int sig)
 {
@@ -31,19 +39,19 @@ static void signal_handler(int sig)
 }
 
 /*---------------------------------------------------------------------------
- * HAL callbacks (wrapping fakeuart)
+ * HAL callbacks (wrapping transport)
  *---------------------------------------------------------------------------*/
 
 static void hal_uart_send(void *user, const uint8_t *buf, uint8_t len)
 {
     (void)user;
-    fakeuart_send(buf, len);
+    transport_send(g_transport, buf, len);
 }
 
 static void hal_uart_set_baud(void *user, uint32_t baud)
 {
     (void)user;
-    (void)baud;  /* fakeuart has no baud concept */
+    (void)baud;  /* transport doesn't support runtime baud change */
 }
 
 static uint32_t hal_time_ms(void *user)
@@ -108,33 +116,76 @@ static void on_event(srxl2_ctx_t *ctx, const srxl2_event_t *evt, void *user)
  * Main
  *---------------------------------------------------------------------------*/
 
+static void print_usage(const char *prog)
+{
+    printf("Usage: %s [options]\n", prog);
+    printf("  -d, --device <name>   Device (bus name or /dev/ttyUSB0)\n");
+    printf("  -s, --serial          Use USB-to-serial instead of fakeuart\n");
+    printf("  -B, --baud <rate>     Baud rate: 115200 or 400000 (default: 115200)\n");
+    printf("  -l, --list-ports      List available serial ports and exit\n");
+    printf("  -h, --help            Show this help\n");
+}
+
 int main(int argc, char *argv[])
 {
-    const char *bus_name = "srxl2bus";
+    const char *device = "srxl2bus";
+    bool use_serial = false;
+    transport_baud_t baud = TRANSPORT_BAUD_115200;
 
-    for (int i = 1; i < argc; i++) {
-        if ((strcmp(argv[i], "--bus") == 0 || strcmp(argv[i], "-b") == 0) &&
-            i + 1 < argc) {
-            bus_name = argv[++i];
-        } else if (strcmp(argv[i], "--help") == 0 ||
-                   strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [--bus <name>]\n", argv[0]);
-            printf("  --bus, -b   Bus name (default: srxl2bus)\n");
+    static const struct option long_opts[] = {
+        {"device",     required_argument, NULL, 'd'},
+        {"serial",     no_argument,       NULL, 's'},
+        {"baud",       required_argument, NULL, 'B'},
+        {"list-ports", no_argument,       NULL, 'l'},
+        {"help",       no_argument,       NULL, 'h'},
+        {NULL, 0, NULL, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "d:sB:lh", long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'd':
+            device = optarg;
+            break;
+        case 's':
+            use_serial = true;
+            break;
+        case 'B': {
+            int rate = atoi(optarg);
+            if (rate == 400000) baud = TRANSPORT_BAUD_400000;
+            else if (rate != 115200) {
+                fprintf(stderr, "Invalid baud rate (use 115200 or 400000)\n");
+                return 1;
+            }
+            break;
+        }
+        case 'l':
+            transport_list_serial_ports();
             return 0;
-        } else {
-            bus_name = argv[i];  /* legacy positional */
+        case 'h':
+            print_usage(argv[0]);
+            return 0;
+        default:
+            print_usage(argv[0]);
+            return 1;
         }
     }
+    if (optind < argc)
+        device = argv[optind];
 
-    printf("=== SRXL2 New Master Simulator (libsrxl2) ===\n");
-    printf("  Bus: %s\n", bus_name);
+    transport_type_t type = use_serial ? TRANSPORT_TYPE_SERIAL : TRANSPORT_TYPE_FAKEUART;
+
+    printf("=== SRXL2 Master (libsrxl2) ===\n");
+    printf("  Transport: %s\n", use_serial ? "serial" : "fakeuart");
+    printf("  Device: %s\n", device);
     printf("  Device ID: 0x10 (Remote Receiver / Master)\n\n");
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    if (!fakeuart_init(bus_name, "NewMaster")) {
-        fprintf(stderr, "Failed to init fakeuart\n");
+    g_transport = transport_init(type, device, "NewMaster", baud);
+    if (!g_transport) {
+        fprintf(stderr, "Failed to init transport\n");
         return 1;
     }
 
@@ -158,7 +209,7 @@ int main(int argc, char *argv[])
     srxl2_ctx_t *ctx = srxl2_init(&cfg);
     if (!ctx) {
         fprintf(stderr, "Failed to init srxl2 context\n");
-        fakeuart_close();
+        transport_close(g_transport);
         return 1;
     }
     srxl2_on_event(ctx, on_event, NULL);
@@ -179,7 +230,7 @@ int main(int argc, char *argv[])
     while (g_running) {
         /* Receive from bus (1ms timeout) */
         uint8_t buf[128];
-        int n = fakeuart_receive(buf, sizeof(buf), 1, NULL, 0);
+        int n = transport_receive(g_transport, buf, sizeof(buf), 1, NULL, 0);
         if (n > 0)
             srxl2_feed(ctx, buf, (size_t)n);
 
@@ -211,15 +262,9 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Stats */
-    fakeuart_stats_t stats;
-    fakeuart_get_stats(&stats);
-    printf("\n[Master] Shutting down.\n");
-    printf("  TX: %llu pkts, %llu bytes\n", stats.tx_packets, stats.tx_bytes);
-    printf("  RX: %llu pkts, %llu bytes\n", stats.rx_packets, stats.rx_bytes);
-    printf("  Frames: %u\n", frame_count);
+    printf("\n[Master] Shutting down. Frames: %u\n", frame_count);
 
     srxl2_destroy(ctx);
-    fakeuart_close();
+    transport_close(g_transport);
     return 0;
 }

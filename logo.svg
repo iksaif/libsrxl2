@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 100">
+  <defs>
+    <linearGradient id="waveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00b4d8"/>
+      <stop offset="50%" stop-color="#0077b6"/>
+      <stop offset="100%" stop-color="#6c63ff"/>
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0077b6"/>
+      <stop offset="100%" stop-color="#6c63ff"/>
+    </linearGradient>
+    <style>
+      @keyframes pulse1 { 0%,100% { opacity: 0.3; } 50% { opacity: 0.9; } }
+      @keyframes pulse2 { 0%,100% { opacity: 0.2; } 50% { opacity: 0.7; } }
+      @keyframes pulse3 { 0%,100% { opacity: 0.1; } 50% { opacity: 0.5; } }
+    </style>
+  </defs>
+
+  <!-- Background rounded rect -->
+  <rect x="2" y="2" width="416" height="96" rx="16" ry="16" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+
+  <!-- UART waveform (half-duplex bus signal) -->
+  <polyline points="22,62 32,62 32,32 47,32 47,62 57,62 57,32 62,32 62,62 77,62 77,32 82,32 82,62 97,62 97,32 107,32 107,62 117,62"
+    stroke="url(#waveGrad)" fill="none" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- Radio wave arcs (broadcasting from the waveform) -->
+  <path d="M 112,42 Q 122,42 122,32" stroke="#00b4d8" fill="none" stroke-width="1.5" opacity="0.6" style="animation: pulse1 2s ease-in-out infinite"/>
+  <path d="M 115,46 Q 130,46 130,28" stroke="#0077b6" fill="none" stroke-width="1.5" opacity="0.4" style="animation: pulse2 2s ease-in-out 0.3s infinite"/>
+  <path d="M 118,50 Q 138,50 138,24" stroke="#6c63ff" fill="none" stroke-width="1.5" opacity="0.2" style="animation: pulse3 2s ease-in-out 0.6s infinite"/>
+
+  <!-- Main text -->
+  <text x="152" y="60" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', monospace" font-size="44" font-weight="bold" letter-spacing="3" fill="url(#textGrad)">SRXL2</text>
+</svg>

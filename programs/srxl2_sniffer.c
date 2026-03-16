@@ -31,6 +31,7 @@ Usage: ./srxl2_sniffer [options]
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
+#include <getopt.h>
 
 // Include libsrxl2
 #include "srxl2.h"
@@ -65,6 +66,13 @@ static bool g_show_internal = false;
 static uint64_t g_packet_count = 0;
 static output_format_t g_format = FORMAT_DETAILS;
 static transport_handle_t* g_transport = NULL;
+
+// Serial framing buffer (reassembles byte stream into complete packets)
+static struct {
+    uint8_t buf[SRXL2_MAX_PACKET_SIZE];
+    uint8_t len;
+    bool synced;
+} g_frame = {0};
 
 // Statistics
 static struct {
@@ -768,24 +776,24 @@ static void print_usage(const char* prog)
 {
     printf("Usage: %s [options]\n", prog);
     printf("\nTransport Options:\n");
-    printf("  --device <name>      Device (bus name or /dev/ttyUSB0)\n");
-    printf("  --serial             Use USB-to-serial instead of fakeuart\n");
-    printf("  --baud <rate>        Baud rate: 115200 or 400000 (default: 115200)\n");
-    printf("  --list-ports         List available serial ports and exit\n");
+    printf("  -d, --device <name>  Device (bus name or /dev/ttyUSB0)\n");
+    printf("  -s, --serial         Use USB-to-serial instead of fakeuart\n");
+    printf("  -B, --baud <rate>    Baud rate: 115200 or 400000 (default: 115200)\n");
+    printf("  -l, --list-ports     List available serial ports and exit\n");
     printf("\nOutput Options:\n");
-    printf("  --format <fmt>       Output format (default: details)\n");
+    printf("  -f, --format <fmt>   Output format (default: details)\n");
     printf("                       details  - Detailed view with packet contents\n");
     printf("                       json     - JSON output (one per line)\n");
     printf("                       oneline  - Compact one-line per packet\n");
     printf("                       state    - Live state view (ncurses)\n");
-    printf("  --hex                Show hex dump (details format only)\n");
-    printf("  --no-color           Disable colors\n");
-    printf("  --show-internal      Show internal heartbeat packets\n");
+    printf("  -x, --hex            Show hex dump (details format only)\n");
+    printf("  -n, --no-color       Disable colors\n");
+    printf("  -I, --show-internal  Show internal heartbeat packets\n");
     printf("\nExamples:\n");
-    printf("  %s --device srxl2bus\n", prog);
-    printf("  %s --serial --device /dev/ttyUSB0 --baud 115200\n", prog);
-    printf("  %s --format json > capture.jsonl\n", prog);
-    printf("  %s --format state\n", prog);
+    printf("  %s -d srxl2bus\n", prog);
+    printf("  %s --serial -d /dev/ttyUSB0 -B 115200\n", prog);
+    printf("  %s -f json > capture.jsonl\n", prog);
+    printf("  %s -f state\n", prog);
 }
 
 int main(int argc, char* argv[])
@@ -794,44 +802,64 @@ int main(int argc, char* argv[])
     bool use_serial = false;
     transport_baud_t baud = TRANSPORT_BAUD_115200;
 
-    // Parse arguments
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            print_usage(argv[0]);
-            return 0;
-        } else if (strcmp(argv[i], "--list-ports") == 0) {
-            transport_list_serial_ports();
-            return 0;
-        } else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
-            device = argv[++i];
-        } else if (strcmp(argv[i], "--serial") == 0) {
+    static const struct option long_opts[] = {
+        {"device",        required_argument, NULL, 'd'},
+        {"serial",        no_argument,       NULL, 's'},
+        {"baud",          required_argument, NULL, 'B'},
+        {"list-ports",    no_argument,       NULL, 'l'},
+        {"format",        required_argument, NULL, 'f'},
+        {"hex",           no_argument,       NULL, 'x'},
+        {"no-color",      no_argument,       NULL, 'n'},
+        {"show-internal", no_argument,       NULL, 'I'},
+        {"help",          no_argument,       NULL, 'h'},
+        {NULL, 0, NULL, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "d:sB:lf:xnIh", long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'd':
+            device = optarg;
+            break;
+        case 's':
             use_serial = true;
-        } else if (strcmp(argv[i], "--baud") == 0 && i + 1 < argc) {
-            int rate = atoi(argv[++i]);
+            break;
+        case 'B': {
+            int rate = atoi(optarg);
             if (rate == 115200) baud = TRANSPORT_BAUD_115200;
             else if (rate == 400000) baud = TRANSPORT_BAUD_400000;
             else {
                 fprintf(stderr, "Invalid baud rate (use 115200 or 400000)\n");
                 return 1;
             }
-        } else if (strcmp(argv[i], "--format") == 0 && i + 1 < argc) {
-            const char* fmt = argv[++i];
-            if (strcmp(fmt, "details") == 0) g_format = FORMAT_DETAILS;
-            else if (strcmp(fmt, "json") == 0) g_format = FORMAT_JSON;
-            else if (strcmp(fmt, "oneline") == 0) g_format = FORMAT_ONELINE;
-            else if (strcmp(fmt, "state") == 0) g_format = FORMAT_STATE;
+            break;
+        }
+        case 'l':
+            transport_list_serial_ports();
+            return 0;
+        case 'f':
+            if (strcmp(optarg, "details") == 0) g_format = FORMAT_DETAILS;
+            else if (strcmp(optarg, "json") == 0) g_format = FORMAT_JSON;
+            else if (strcmp(optarg, "oneline") == 0) g_format = FORMAT_ONELINE;
+            else if (strcmp(optarg, "state") == 0) g_format = FORMAT_STATE;
             else {
                 fprintf(stderr, "Invalid format (use: details, json, oneline, state)\n");
                 return 1;
             }
-        } else if (strcmp(argv[i], "--hex") == 0) {
+            break;
+        case 'x':
             g_show_hex = true;
-        } else if (strcmp(argv[i], "--no-color") == 0) {
+            break;
+        case 'n':
             g_use_colors = false;
-        } else if (strcmp(argv[i], "--show-internal") == 0) {
+            break;
+        case 'I':
             g_show_internal = true;
-        } else {
-            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            break;
+        case 'h':
+            print_usage(argv[0]);
+            return 0;
+        default:
             print_usage(argv[0]);
             return 1;
         }
@@ -863,11 +891,56 @@ int main(int argc, char* argv[])
     // Main loop
     uint8_t buffer[SRXL2_MAX_PACKET_SIZE];
     char sender[64];
+    bool is_serial = (type == TRANSPORT_TYPE_SERIAL);
 
     while (g_running) {
         int bytes = transport_receive(g_transport, buffer, sizeof(buffer), 100, sender, sizeof(sender));
-        if (bytes > 0) {
+        if (bytes <= 0)
+            continue;
+
+        if (!is_serial) {
+            // Fakeuart: each receive is one complete packet
             process_packet(buffer, bytes, sender);
+        } else {
+            // Serial: byte stream needs framing
+            for (int i = 0; i < bytes; i++) {
+                uint8_t b = buffer[i];
+
+                if (!g_frame.synced) {
+                    if (b == 0xA6) { // SRXL2_MAGIC
+                        g_frame.buf[0] = b;
+                        g_frame.len = 1;
+                        g_frame.synced = true;
+                    }
+                    continue;
+                }
+
+                if (g_frame.len < SRXL2_MAX_PACKET_SIZE) {
+                    g_frame.buf[g_frame.len++] = b;
+                } else {
+                    // Overflow, resync
+                    g_frame.synced = false;
+                    g_frame.len = 0;
+                    continue;
+                }
+
+                // Once we have 3 bytes, we know expected length
+                if (g_frame.len >= 3) {
+                    uint8_t expected = g_frame.buf[2];
+                    if (expected < 5 || expected > SRXL2_MAX_PACKET_SIZE) {
+                        // Invalid length, resync
+                        g_frame.synced = false;
+                        g_frame.len = 0;
+                        continue;
+                    }
+                    if (g_frame.len >= expected) {
+                        // Complete packet
+                        process_packet(g_frame.buf, expected, sender);
+                        g_frame.synced = false;
+                        g_frame.len = 0;
+                    }
+                }
+            }
         }
     }
 

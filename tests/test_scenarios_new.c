@@ -111,6 +111,7 @@ static void new_init_slave(scenario_harness_t *h, uint8_t device_id)
             .user = NULL,
         },
         .baud_supported = SRXL2_BAUD_400000,
+        .unprompted_hs = ((device_id & 0x0F) == 0),  /* match legacy behavior for scenarios */
     };
     d->ctx = srxl2_init_static(d->ctx_buf, sizeof(d->ctx_buf), &cfg);
 }

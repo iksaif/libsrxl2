@@ -183,10 +183,48 @@ static void test_slave_starts_in_startup(void)
     TEST_END();
 }
 
-static void test_slave_sends_unprompted_handshake(void)
+static srxl2_ctx_t *create_slave_opts(uint8_t device_id, bool unprompted_hs)
 {
-    TEST_BEGIN(test_slave_sends_unprompted_handshake);
+    mock_reset();
+    srxl2_config_t cfg = {
+        .role = SRXL2_ROLE_SLAVE,
+        .device = {
+            .device_id = device_id,
+            .priority = 10,
+            .info = SRXL2_DEVINFO_NO_RF,
+            .uid = 0xAABBCCDD,
+        },
+        .hal = {
+            .uart_send = mock_uart_send,
+            .uart_set_baud = mock_uart_set_baud,
+            .time_ms = mock_time_ms,
+            .user = NULL,
+        },
+        .baud_supported = SRXL2_BAUD_400000,
+        .unprompted_hs = unprompted_hs,
+    };
+    srxl2_ctx_t *ctx = srxl2_init_static(ctx_buf, sizeof(ctx_buf), &cfg);
+    srxl2_on_event(ctx, mock_event_cb, NULL);
+    return ctx;
+}
+
+static void test_slave_no_unprompted_handshake_by_default(void)
+{
+    TEST_BEGIN(test_slave_no_unprompted_handshake_by_default);
     srxl2_ctx_t *ctx = create_slave(0xB0); /* unit_id = 0 */
+
+    advance_ms(ctx, 50);
+
+    /* Default: no unprompted broadcast (avoids collisions on active bus) */
+    ASSERT_STR_EQ("HANDSHAKE", srxl2_get_state(ctx));
+    ASSERT_TRUE(mock_pkt_count == 0);
+    TEST_END();
+}
+
+static void test_slave_unprompted_handshake_when_enabled(void)
+{
+    TEST_BEGIN(test_slave_unprompted_handshake_when_enabled);
+    srxl2_ctx_t *ctx = create_slave_opts(0xB0, true); /* unit_id = 0, enabled */
 
     advance_ms(ctx, 50);
 
@@ -426,8 +464,8 @@ static void test_slave_handshake_timeout_resets(void)
     advance_ms(ctx, 50); /* enter handshake */
     ASSERT_STR_EQ("HANDSHAKE", srxl2_get_state(ctx));
 
-    /* Wait 200ms without receiving anything */
-    advance_ms(ctx, 200);
+    /* Wait 500ms without receiving anything (SRXL2_HANDSHAKE_TIMEOUT_MS) */
+    advance_ms(ctx, 500);
 
     ASSERT_STR_EQ("STARTUP", srxl2_get_state(ctx));
     TEST_END();
@@ -574,7 +612,8 @@ int main(void)
 
     /* Startup */
     RUN_TEST(test_slave_starts_in_startup);
-    RUN_TEST(test_slave_sends_unprompted_handshake);
+    RUN_TEST(test_slave_no_unprompted_handshake_by_default);
+    RUN_TEST(test_slave_unprompted_handshake_when_enabled);
     RUN_TEST(test_slave_nonzero_unit_listens);
 
     /* Handshake Response */
