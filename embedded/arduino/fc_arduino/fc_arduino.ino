@@ -218,6 +218,7 @@ void setup()
     cfg.hal.time_ms       = hal_time_ms;
     cfg.hal.user          = NULL;
     cfg.baud_supported = SRXL2_BAUD_115200;
+    cfg.unprompted_hs  = true;  /* kick receivers that need handshake to enter SRXL2 mode */
 
     ctx = srxl2_init_static(ctx_buf, sizeof(ctx_buf), &cfg);
     if (!ctx) {

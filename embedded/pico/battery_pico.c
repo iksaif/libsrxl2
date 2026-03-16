@@ -209,6 +209,7 @@ int main(void)
             .user          = NULL,
         },
         .baud_supported = SRXL2_BAUD_115200,
+        .unprompted_hs  = true,  /* kick receivers that need handshake to enter SRXL2 mode */
     };
 
     ctx = srxl2_init_static(ctx_buf, sizeof(ctx_buf), &cfg);
@@ -218,7 +219,7 @@ int main(void)
     }
     srxl2_on_event(ctx, on_event, NULL);
 
-    printf("Waiting for master handshake...\n\n");
+    printf("Waiting for master handshake (sending broadcast)...\n\n");
 
     last_status_ms = 0;
     last_batt_update_ms = 0;

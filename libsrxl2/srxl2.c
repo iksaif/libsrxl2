@@ -543,21 +543,20 @@ static void tick_startup(srxl2_ctx_t *ctx)
         ctx->peer_count = 0;
         ctx->peer_priority_sum = 0;
     } else {
-        /* Slave: optionally send unprompted broadcast (unit_id==0 per spec).
-         * Disabled by default -- collides with master traffic on active bus. */
+        /* Slave: optionally send unprompted broadcast handshake (dest=0).
+         * Disabled by default -- collides with master traffic on active bus.
+         * Needed for receivers (e.g. AR10360T) that require a handshake
+         * to switch from their default mode (PWM/DSMX) into SRXL2. */
         if (ctx->config.unprompted_hs) {
-            uint8_t unit_id = ctx->config.device.device_id & 0x0F;
-            if (unit_id == 0) {
-                uint8_t len = srxl2_pkt_handshake(
-                    ctx->tx_buf,
-                    ctx->config.device.device_id,
-                    0x00,
-                    ctx->config.device.priority,
-                    ctx->config.baud_supported,
-                    ctx->config.device.info,
-                    ctx->config.device.uid);
-                hal_send(ctx, ctx->tx_buf, len);
-            }
+            uint8_t len = srxl2_pkt_handshake(
+                ctx->tx_buf,
+                ctx->config.device.device_id,
+                0x00,
+                ctx->config.device.priority,
+                ctx->config.baud_supported,
+                ctx->config.device.info,
+                ctx->config.device.uid);
+            hal_send(ctx, ctx->tx_buf, len);
         }
         enter_state(ctx, SRXL2_STATE_HANDSHAKE);
     }
@@ -612,6 +611,22 @@ static void tick_handshake_slave(srxl2_ctx_t *ctx)
         ctx->negotiated_baud = SRXL2_BAUD_115200;
         hal_set_baud(ctx, 115200);
         enter_state(ctx, SRXL2_STATE_STARTUP);
+        return;
+    }
+
+    /* When unprompted_hs is enabled, keep sending broadcast handshakes
+     * every 50ms to kick receivers (e.g. AR10360T) into SRXL2 mode.
+     * Some receivers stay in PWM/DSMX until they see a handshake. */
+    if (ctx->config.unprompted_hs && time_since_tx(ctx) >= SRXL2_STARTUP_DELAY_MS) {
+        uint8_t len = srxl2_pkt_handshake(
+            ctx->tx_buf,
+            ctx->config.device.device_id,
+            0x00,
+            ctx->config.device.priority,
+            ctx->config.baud_supported,
+            ctx->config.device.info,
+            ctx->config.device.uid);
+        hal_send(ctx, ctx->tx_buf, len);
     }
     /* Packet handling is done in dispatch_packet / on_handshake */
 }
