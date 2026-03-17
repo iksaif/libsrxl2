@@ -13,9 +13,18 @@
 
 /*---------------------------------------------------------------------------
  * CRC-16 (XMODEM, polynomial 0x1021, seed 0)
+ *
+ * Three modes (compile-time):
+ *   default          -- table-based lookup (512 bytes flash, fast)
+ *   SRXL2_CRC_SMALL  -- bitwise computation (0 extra flash, slow)
+ *   SRXL2_CRC_EXTERN -- user provides srxl2_crc16() externally
+ *                        (e.g. STM32F7/H7 hardware CRC unit)
  *---------------------------------------------------------------------------*/
 
-#ifndef SRXL2_CRC_SMALL
+#ifdef SRXL2_CRC_EXTERN
+/* User provides: uint16_t srxl2_crc16(const uint8_t *data, size_t len) */
+
+#elif !defined(SRXL2_CRC_SMALL)
 
 #include "srxl2_crc_table.inc"
 
@@ -46,7 +55,7 @@ uint16_t srxl2_crc16(const uint8_t *data, size_t len)
     return crc;
 }
 
-#endif /* SRXL2_CRC_SMALL */
+#endif /* SRXL2_CRC */
 
 /*---------------------------------------------------------------------------
  * CRC validation

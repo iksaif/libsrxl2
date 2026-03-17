@@ -216,7 +216,13 @@ uint8_t srxl2_pkt_fwd_pgm(uint8_t *buf, uint8_t reply_id, int8_t rssi,
                             const uint8_t *data, uint8_t data_len);
 
 /*---------------------------------------------------------------------------
- * CRC
+ * CRC-16 (XMODEM, polynomial 0x1021, seed 0)
+ *
+ * Compile-time modes:
+ *   (default)        -- 256-entry table lookup (512B flash, ~4 cycles/byte)
+ *   SRXL2_CRC_SMALL  -- bitwise loop (0B extra flash, ~80 cycles/byte)
+ *   SRXL2_CRC_EXTERN -- user provides this function externally;
+ *                        see srxl2_crc_stm32.c for an STM32F7/H7 example
  *---------------------------------------------------------------------------*/
 
 uint16_t srxl2_crc16(const uint8_t *data, size_t len);
