@@ -58,6 +58,22 @@ jobs:
           cp LICENSE "$dir/" 2>/dev/null || true
           tar czf "srxl2-master-${{ steps.version.outputs.version }}.tar.gz" "$dir"
 
+      - name: Package srxl2-master-standalone
+        run: |
+          dir="srxl2-master-standalone-${{ steps.version.outputs.version }}"
+          mkdir -p "$dir/src" "$dir/types"
+          cp SRXL2_Master_Standalone/srxl_master_standalone.c \
+             SRXL2_Master_Standalone/srxl_master_standalone.h \
+             SRXL2_Master_Standalone/srxl_master_crc_table.inc \
+             SRXL2_Master_Standalone/srxl_master_crc_stm32.c \
+             SRXL2_Master_Standalone/spm_srxl_config.h \
+             "$dir/src/"
+          # spm_srxl.h is needed for the packet *types* (this module reuses them)
+          cp SRXL2/Source/spm_srxl.h "$dir/types/"
+          cp SRXL2_Master_Standalone/README.md "$dir/" 2>/dev/null || true
+          cp LICENSE "$dir/" 2>/dev/null || true
+          tar czf "srxl2-master-standalone-${{ steps.version.outputs.version }}.tar.gz" "$dir"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -65,3 +81,4 @@ jobs:
           files: |
             libsrxl2-${{ steps.version.outputs.version }}.tar.gz
             srxl2-master-${{ steps.version.outputs.version }}.tar.gz
+            srxl2-master-standalone-${{ steps.version.outputs.version }}.tar.gz

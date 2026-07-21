@@ -30,11 +30,12 @@ Open-source SRXL2 protocol library for third-party integrations (flight controll
 ├── libsrxl2/           Modern SRXL2 protocol stack (context-based, no globals)
 ├── SRXL2/              Official Spektrum library (submodule, read-only)
 ├── SRXL2_Master/       Legacy bus master hooks for the official library
+├── SRXL2_Master_Standalone/  Standalone master: spm_srxl.h types, zero shared globals
 ├── fakeuart/           UDP multicast virtual UART (simulates half-duplex bus)
 ├── libtransport/       Abstraction over fakeuart and serial ports
 ├── programs/           Simulation programs
 ├── embedded/           Embedded targets (Pico, Arduino)
-├── tests/              Test suite (11 tests)
+├── tests/              Test suite (13 tests)
 └── SpektrumDocumentation/  Spektrum telemetry definitions (submodule)
 ```
 
@@ -46,6 +47,22 @@ Context-based C11 library supporting both master and slave roles. No globals, no
 - **srxl2_packet.c/h** -- Packet codec (encode/decode all SRXL2 packet types)
 - **srxl2_telemetry.c/h** -- Telemetry payload decoder (ESC, FP_MAH, LiPo monitor, Smart Battery, RPM)
 - **srxl2_internal.h** -- Internal context struct and constants
+
+### SRXL2_Master_Standalone
+
+A standalone bus **master** that is wire- and type-compatible with the official
+`spm_srxl.h` (it reuses `SrxlChannelData`, `SrxlBindData`, `SrxlTelemetryData`,
+`SrxlState`, … as *types*) but keeps **all** state in a caller-owned
+`SrxlMasterCtx` and never links `spm_srxl.c`.
+
+This is for the case where a project already runs the official `spm_srxl.c`
+engine as a **slave** (whose identity is the process-wide global `srxlThisDev`)
+and *also* needs to be a master with a **different** device ID on another UART —
+which the single global identity cannot do. Both engines can then run in one
+process with zero shared state. See
+[`SRXL2_Master_Standalone/README.md`](SRXL2_Master_Standalone/README.md) and the
+`srxl2_coexist_sim` demo. (Contrast with `SRXL2_Master/` below, which drives the
+official engine directly and therefore inherits its single global identity.)
 
 ### Legacy (SRXL2 + SRXL2_Master)
 
@@ -67,7 +84,7 @@ make -j
 ctest --output-on-failure
 ```
 
-All 11 tests cover: CRC, packet codec, telemetry decoding, master/slave state machines, interop between old and new libraries, and scenario tests.
+All 13 tests cover: CRC, packet codec, telemetry decoding, master/slave state machines, interop between old and new libraries, scenario tests, and the standalone master's coexistence + byte-level wire-compatibility with the real `spm_srxl.c` engine.
 
 ## Simulation Programs
 
@@ -79,6 +96,7 @@ Two sets of simulators exist -- legacy (using the official library) and new (usi
 | `srxl2_new_battery_sim` | libsrxl2 | Battery sensor | 0xB0 |
 | `srxl2_master_sim` | legacy | Bus master | 0x10 |
 | `srxl2_battery_sim` | legacy | Battery sensor | 0xB0 |
+| `srxl2_coexist_sim` | standalone + `spm_srxl.c` | Master (0x21) + slave (0x40) in one process | 0x21 / 0x40 |
 | `srxl2_sniffer` | libsrxl2 | Passive sniffer | -- |
 
 ### Quick Demo
