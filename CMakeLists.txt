@@ -33,6 +33,11 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/SpektrumDocumentation/Telemetry
 )
 
+# NOTE: SRXL2_Master_Standalone is intentionally NOT in the global include
+# path. It ships its own minimal spm_srxl_config.h, and its targets add
+# SRXL2/Source + SRXL2_Master_Standalone explicitly (BEFORE PRIVATE) so the
+# right config is picked up without polluting other targets.
+
 ###############################################################################
 # Fake UART Library
 ###############################################################################
@@ -89,6 +94,31 @@ target_include_directories(srxl2_master BEFORE PRIVATE
 )
 
 target_link_libraries(srxl2_master srxl2)
+
+###############################################################################
+# SRXL2 Master Standalone Library
+#
+# Wire-/type-compatible with SRXL2/Source/spm_srxl.h, but with zero shared
+# global state and zero link dependency on spm_srxl.c. Can run in the same
+# process as an spm_srxl.c engine instance (e.g. a slave) with a different
+# device identity on a different UART.
+###############################################################################
+
+add_library(srxl2_master_standalone STATIC
+    SRXL2_Master_Standalone/srxl_master_standalone.c
+    SRXL2_Master_Standalone/srxl_master_standalone.h
+)
+
+# spm_srxl.h (types only) + our own minimal config first in the search path.
+target_include_directories(srxl2_master_standalone BEFORE PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master_Standalone
+)
+target_include_directories(srxl2_master_standalone PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2/Source
+)
+
+# Optional: small CRC mode (bitwise instead of table lookup)
+# target_compile_definitions(srxl2_master_standalone PRIVATE SRXL_MASTER_CRC_SMALL)
 
 ###############################################################################
 # Simulation Programs
@@ -198,6 +228,26 @@ target_link_libraries(srxl2_new_battery_sim
 )
 
 ###############################################################################
+# SRXL2 Master Standalone — coexistence demo
+#
+# Runs the REAL spm_srxl.c as a pure slave (no SRXL_INCLUDE_MASTER_CODE) and
+# the standalone master in one process, proving distinct identities with zero
+# shared global state.
+###############################################################################
+
+add_executable(srxl2_coexist_sim
+    SRXL2_Master_Standalone/examples/coexist_sim.c
+    SRXL2/Source/spm_srxl.c
+)
+# examples/ first → the slave-only spm_srxl_config.h; then module + SRXL2 src.
+target_include_directories(srxl2_coexist_sim BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master_Standalone/examples
+    ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master_Standalone
+    ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2/Source
+)
+target_link_libraries(srxl2_coexist_sim srxl2_master_standalone m)
+
+###############################################################################
 # SRXL2_Master Examples (optional)
 ###############################################################################
 
@@ -289,6 +339,25 @@ if(BUILD_TESTS)
     )
     add_test(NAME test_scenarios_new COMMAND test_scenarios_new)
 
+    # Shared scenario tests — standalone master runner
+    add_executable(test_scenarios_standalone tests/test_scenarios_standalone.c)
+    # SRXL2_Master_Standalone first so its spm_srxl_config.h wins over the
+    # programs/ one that the global include_directories() would otherwise find.
+    target_include_directories(test_scenarios_standalone BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master_Standalone
+        ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2/Source
+    )
+    target_include_directories(test_scenarios_standalone PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/libsrxl2
+    )
+    target_link_libraries(test_scenarios_standalone
+        srxl2_master_standalone
+        libsrxl2
+        m
+    )
+    add_test(NAME test_scenarios_standalone COMMAND test_scenarios_standalone)
+
     # Shared scenario tests — legacy lib runner
     add_executable(test_scenarios_legacy
         tests/test_scenarios_legacy.c
@@ -310,6 +379,33 @@ if(BUILD_TESTS)
     )
     target_link_libraries(test_scenarios_legacy libsrxl2 m)
     add_test(NAME test_scenarios_legacy COMMAND test_scenarios_legacy)
+
+    # Coexistence + wire-compat test — standalone master vs. REAL spm_srxl.c.
+    # Compiles spm_srxl.c (as a slave) + test_helpers.c directly, and links
+    # the standalone master library.
+    add_executable(test_master_standalone_coexist
+        tests/test_master_standalone_coexist.c
+        tests/test_helpers.c
+        SRXL2/Source/spm_srxl.c
+        SRXL2_Master/spm_srxl_master.c
+    )
+    target_compile_definitions(test_master_standalone_coexist PRIVATE
+        SRXL_INCLUDE_MASTER_CODE
+        SRXL_ENABLE_INTERNAL
+    )
+    # tests/ first → capture spm_srxl_config.h; then SRXL2/Source + the module.
+    target_include_directories(test_master_standalone_coexist BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2/Source
+        ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master
+        ${CMAKE_CURRENT_SOURCE_DIR}/SRXL2_Master_Standalone
+    )
+    target_link_libraries(test_master_standalone_coexist
+        srxl2_master_standalone
+        m
+    )
+    add_test(NAME test_master_standalone_coexist
+             COMMAND test_master_standalone_coexist)
 endif()
 
 ###############################################################################
@@ -322,11 +418,13 @@ install(TARGETS
     srxl2_sniffer
     srxl2_new_master_sim
     srxl2_new_battery_sim
+    srxl2_coexist_sim
     DESTINATION bin
 )
 
 install(TARGETS
     libsrxl2
+    srxl2_master_standalone
     transport
     fakeuart
     DESTINATION lib
@@ -337,6 +435,11 @@ install(FILES
     libsrxl2/srxl2_packet.h
     libsrxl2/srxl2_telemetry.h
     DESTINATION include/srxl2
+)
+
+install(FILES
+    SRXL2_Master_Standalone/srxl_master_standalone.h
+    DESTINATION include/srxl2_master_standalone
 )
 
 install(FILES
@@ -366,6 +469,7 @@ message(STATUS "  srxl2_master_sim      - SRXL2 Master Simulator (legacy)")
 message(STATUS "  srxl2_battery_sim     - SRXL2 Battery Simulator (legacy)")
 message(STATUS "  srxl2_new_master_sim  - SRXL2 Master Simulator (libsrxl2)")
 message(STATUS "  srxl2_new_battery_sim - SRXL2 Battery Simulator (libsrxl2)")
+message(STATUS "  srxl2_coexist_sim     - Standalone master + spm_srxl.c slave coexistence demo")
 message(STATUS "  srxl2_sniffer         - SRXL2 Bus Sniffer")
 message(STATUS "═══════════════════════════════════════════════")
 message(STATUS "")
